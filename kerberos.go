@@ -60,6 +60,12 @@ func md5Sum(b []byte) []byte {
 
 // kerberosEncrypt RC4-encrypts data with key and appends a 16-byte HMAC-MD5 of
 // the ciphertext (keyed with the same key).
+//
+// NOTE: RC4 is cryptographically broken (fluhrer-Mantin-Shamir attack, 2001+).
+// It is used here solely for NEX-protocol compatibility — Nintendo's spec
+// mandates RC4 for Kerberos ticket encryption. Do not reuse this cipher for
+// any other purpose. The HMAC-MD5 checksum mitigates the worst of RC4's
+// malleability but does not fix its fundamental weaknesses.
 func kerberosEncrypt(key, data []byte) []byte {
 	c, _ := rc4.NewCipher(key)
 	enc := make([]byte, len(data))
