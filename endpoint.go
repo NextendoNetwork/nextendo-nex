@@ -12,7 +12,7 @@ import (
 
 // placeholderPIDCounter assigns anonymous PIDs to secure connections that arrive
 // without a valid Kerberos ticket (private-test leniency).
-var placeholderPIDCounter uint64
+var placeholderPIDCounter atomic.Uint64
 
 // fragmentPacing is the delay inserted between successive fragments of a large reliable
 // response. Blasting every fragment of a big payload (e.g. SSBU's 15.7 KB DataStore init
@@ -23,7 +23,7 @@ var placeholderPIDCounter uint64
 // was tried here instead and stretched the same payload to ~2.2 s.)
 // Env NEXTENDO_FRAG_PACING_MS overrides it (0 disables). Single-fragment responses
 // (the common case) never hit it.
-var fragmentPacing = func() time.Duration {
+func defaultFragmentPacing() time.Duration {
 	ms := 15
 	if v := os.Getenv("NEXTENDO_FRAG_PACING_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -31,7 +31,7 @@ var fragmentPacing = func() time.Duration {
 		}
 	}
 	return time.Duration(ms) * time.Millisecond
-}()
+}
 
 // retransmitInterval is how often unacknowledged reliable packets are re-sent. It is a
 // slow last-resort backstop: a fast interval re-sends fragments the console is still
@@ -55,6 +55,11 @@ type Endpoint struct {
 	Secure    bool
 	SecureKey []byte
 
+	// FragmentPacing is the per-endpoint delay between successive fragments of
+	// a large reliable response. Overrides the global default from
+	// NEXTENDO_FRAG_PACING_MS. Zero means no pacing.
+	FragmentPacing time.Duration
+
 	// OnConnect, if set, is called once a connection completes its handshake.
 	OnConnect func(*Connection)
 	// OnDisconnect, if set, is called when a connection is torn down.
@@ -71,14 +76,16 @@ type Endpoint struct {
 	customPacketHandlers map[uint8]func(*Connection, *Packet)
 
 	connections map[uint32]*Connection
-	connMu      sync.Mutex
+	connMu      sync.RWMutex
 	connCounter uint32
+	reaperOnce  sync.Once
 }
 
 // NewEndpoint returns an endpoint bound to the given settings.
 func NewEndpoint(settings *Settings) *Endpoint {
 	return &Endpoint{
 		Settings:             settings,
+		FragmentPacing:       defaultFragmentPacing(),
 		handlers:             map[uint16]RMCHandler{},
 		customPacketHandlers: map[uint8]func(*Connection, *Packet){},
 		connections:          map[uint32]*Connection{},
@@ -114,17 +121,17 @@ func (e *Endpoint) unregisterConnection(c *Connection) {
 
 // FindConnectionByID returns the live connection with the given id, or nil.
 func (e *Endpoint) FindConnectionByID(id uint32) *Connection {
-	e.connMu.Lock()
+	e.connMu.RLock()
 	c := e.connections[id]
-	e.connMu.Unlock()
+	e.connMu.RUnlock()
 	return c
 }
 
 // FindConnectionByPID returns a live connection whose PID matches, or nil. Used to
 // push a Participate notification to every player in a gathering by their PID.
 func (e *Endpoint) FindConnectionByPID(pid uint64) *Connection {
-	e.connMu.Lock()
-	defer e.connMu.Unlock()
+	e.connMu.RLock()
+	defer e.connMu.RUnlock()
 	for _, c := range e.connections {
 		if c.PID == pid {
 			return c
@@ -393,7 +400,7 @@ func (c *Connection) processLoginRequest(payload []byte) ([]byte, error) {
 			c.PID = pid
 			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> recent auth pid=%d\n", c.RemoteAddr, c.PID)
 		} else {
-			c.PID = 1800000000 + atomic.AddUint64(&placeholderPIDCounter, 1)
+			c.PID = 1800000000 + placeholderPIDCounter.Add(1)
 			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> placeholder pid=%d\n", c.RemoteAddr, c.PID)
 		}
 		return []byte{}, nil
@@ -565,8 +572,8 @@ func (c *Connection) sendData(data []byte) {
 			// SSBU's native DataStore-fetch watchdog and crashed Ryujinx (the small
 			// single-fragment arena responses were unaffected, which is why arenas worked
 			// but quick match didn't). retransmitLoop still backstops any dropped fragment.
-			if fragmentPacing > 0 {
-				time.Sleep(fragmentPacing)
+			if c.Endpoint.FragmentPacing > 0 {
+				time.Sleep(c.Endpoint.FragmentPacing)
 			}
 		}
 	}()
