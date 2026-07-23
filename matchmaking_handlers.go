@@ -675,6 +675,12 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	// and the console stalls at MatchMakingExt m=1.
 	urls, status := natBridgeStations(host.Stations())
 	if status != bridgeNoRVCID {
+		switch status {
+		case bridgeOK:
+			fmt.Printf("[MM] GetSessionURLs pid=%d: host found in NAT bridge — delivering REAL UDP endpoint (direct P2P enabled)\n", conn.PID)
+		default:
+			fmt.Printf("[MM] GetSessionURLs pid=%d: NAT bridge unavailable (%v) — delivering raw station URLs (relay fallback, P2P disabled)\n", conn.PID, status)
+		}
 		// Either it worked, or nothing a moment brings will change it.
 		return sessionURLsResponse(conn, req, urls)
 	}
