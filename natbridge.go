@@ -81,6 +81,11 @@ func natPortForIP(ip string) (int, bool) {
 			natCache = map[string]int{}
 			natCacheRead = time.Now()
 
+			if natCache == nil {
+				fmt.Printf("[natbridge] WARNING: NAT file %s not readable (%v) — "
+					+"no UDP endpoint observations available. P2P joins will use raw TCP ports.\n",
+					natFilePath(), err)
+			}
 			return 0, false
 		}
 
