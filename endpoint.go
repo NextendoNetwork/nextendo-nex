@@ -12,7 +12,7 @@ import (
 
 // placeholderPIDCounter assigns anonymous PIDs to secure connections that arrive
 // without a valid Kerberos ticket (private-test leniency).
-var placeholderPIDCounter atomic.Uint64
+var placeholderPIDCounter uint64
 
 // fragmentPacing is the delay inserted between successive fragments of a large reliable
 // response. Blasting every fragment of a big payload (e.g. SSBU's 15.7 KB DataStore init
@@ -23,7 +23,7 @@ var placeholderPIDCounter atomic.Uint64
 // was tried here instead and stretched the same payload to ~2.2 s.)
 // Env NEXTENDO_FRAG_PACING_MS overrides it (0 disables). Single-fragment responses
 // (the common case) never hit it.
-func defaultFragmentPacing() time.Duration {
+var fragmentPacing = func() time.Duration {
 	ms := 15
 	if v := os.Getenv("NEXTENDO_FRAG_PACING_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -31,7 +31,7 @@ func defaultFragmentPacing() time.Duration {
 		}
 	}
 	return time.Duration(ms) * time.Millisecond
-}
+}()
 
 // retransmitInterval is how often unacknowledged reliable packets are re-sent. It is a
 // slow last-resort backstop: a fast interval re-sends fragments the console is still
@@ -55,17 +55,16 @@ type Endpoint struct {
 	Secure    bool
 	SecureKey []byte
 
-	// FragmentPacing is the per-endpoint delay between successive fragments of
-	// a large reliable response. Overrides the global default from
-	// NEXTENDO_FRAG_PACING_MS. Zero means no pacing.
-	FragmentPacing time.Duration
-
 	// OnConnect, if set, is called once a connection completes its handshake.
 	OnConnect func(*Connection)
 	// OnDisconnect, if set, is called when a connection is torn down.
 	OnDisconnect func(*Connection)
 	// OnRMC, if set, is called for every inbound RMC request (for logging).
 	OnRMC func(*Connection, *RMCMessage)
+	// OnNATProperties, if set, is called when a client reports its NAT behaviour +
+	// ping via NATTraversal ReportNATProperties, so the monitoring dashboard can show
+	// each player's NAT type and latency (lost when the games moved off the previous stack).
+	OnNATProperties func(pid uint64, natMap, natFilter, rtt uint32)
 
 	handlers map[uint16]RMCHandler
 	mu       sync.RWMutex
@@ -76,16 +75,14 @@ type Endpoint struct {
 	customPacketHandlers map[uint8]func(*Connection, *Packet)
 
 	connections map[uint32]*Connection
-	connMu      sync.RWMutex
+	connMu      sync.Mutex
 	connCounter uint32
-	reaperOnce  sync.Once
 }
 
 // NewEndpoint returns an endpoint bound to the given settings.
 func NewEndpoint(settings *Settings) *Endpoint {
 	return &Endpoint{
 		Settings:             settings,
-		FragmentPacing:       defaultFragmentPacing(),
 		handlers:             map[uint16]RMCHandler{},
 		customPacketHandlers: map[uint8]func(*Connection, *Packet){},
 		connections:          map[uint32]*Connection{},
@@ -121,23 +118,42 @@ func (e *Endpoint) unregisterConnection(c *Connection) {
 
 // FindConnectionByID returns the live connection with the given id, or nil.
 func (e *Endpoint) FindConnectionByID(id uint32) *Connection {
-	e.connMu.RLock()
+	e.connMu.Lock()
 	c := e.connections[id]
-	e.connMu.RUnlock()
+	e.connMu.Unlock()
 	return c
 }
 
-// FindConnectionByPID returns a live connection whose PID matches, or nil. Used to
-// push a Participate notification to every player in a gathering by their PID.
+// FindConnectionByPID returns the MOST RECENT live connection whose PID matches, or nil.
+// Used to push a Participate notification to every player in a gathering by their PID.
+//
+// A player who reconnects (very common: leaving/re-entering online, a dropped WebSocket that
+// re-CONNECTs) briefly has TWO connections under the same PID in the map until the old one is
+// reaped. Returning "the first match" iterated a Go map — whose order is RANDOMISED — so it
+// handed back a STALE connection about half the time. The killer symptom: when a visitor joins,
+// the host's Participate notification (which tells its Pia to add the visitor to the mesh
+// StationIdStatusTable) went to the dead connection, so the LIVE host never enrolled the visitor
+// and silently dropped its P2P game traffic — while still answering the low-level NAT probe
+// (that path uses FindConnectionByID on the exact RVCID = the live connection), giving a
+// "hole-punch ok" that masks the real failure. Net effect for ACNH: 2618-0502 "other consoles
+// not responding". Always hand back the highest-ID (newest) connection for the PID.
 func (e *Endpoint) FindConnectionByPID(pid uint64) *Connection {
-	e.connMu.RLock()
-	defer e.connMu.RUnlock()
+	e.connMu.Lock()
+	defer e.connMu.Unlock()
+	var newest *Connection
+	matches := 0
 	for _, c := range e.connections {
 		if c.PID == pid {
-			return c
+			matches++
+			if newest == nil || c.ID > newest.ID {
+				newest = c
+			}
 		}
 	}
-	return nil
+	if matches > 1 {
+		fmt.Printf("[endpoint/diag] FindConnectionByPID(%d): %d connexions (DOUBLON perime) -> garde id=%d\n", pid, matches, newest.ID)
+	}
+	return newest
 }
 
 // SetSecureAccount marks the endpoint secure and derives its ticket key from the
@@ -191,6 +207,12 @@ type Connection struct {
 	stationMu   sync.RWMutex
 	stationURLs []*StationURL
 
+	// natMapV / natFilterV cache the player's NAT behaviour from ReportNATProperties
+	// (protocol 0x03 / method 5). Written by THIS connection's own receive goroutine and
+	// read by OTHER connections' goroutines during NAT-aware matchmaking — hence atomic.
+	natMapV    atomic.Uint32
+	natFilterV atomic.Uint32
+
 	send func([]byte)
 
 	sessionKey    []byte
@@ -236,6 +258,45 @@ func (c *Connection) IdleFor() time.Duration {
 		return 0
 	}
 	return time.Since(time.Unix(0, ns))
+}
+
+// SetNATProps records the NAT mapping/filtering behaviour the client reported via
+// ReportNATProperties, for NAT-aware matchmaking.
+func (c *Connection) SetNATProps(natMap, natFilter uint32) {
+	c.natMapV.Store(natMap)
+	c.natFilterV.Store(natFilter)
+}
+
+// NATProps returns the last-reported NAT mapping/filtering behaviour (0,0 if the client
+// hasn't reported yet — treated as "unknown" by the matchmaker, which then stays optimistic).
+func (c *Connection) NATProps() (natMap, natFilter uint32) {
+	return c.natMapV.Load(), c.natFilterV.Load()
+}
+
+// NATBehaviour returns the NAT mapping/filtering to classify this client for matchmaking. It
+// prefers the ReportNATProperties values (Splatoon 2 sends 0x03/5), and falls back to the
+// natm/natf the client registers in its station URLs — Mario Kart never sends ReportNATProperties,
+// so without this fallback NAT-aware matchmaking would see every MK8 player as "unknown". Returns
+// (0,0) when nothing is known yet (the matchmaker then stays optimistic / fail-open).
+func (c *Connection) NATBehaviour() (natMap, natFilter uint32) {
+	if m := c.natMapV.Load(); m != 0 {
+		return m, c.natFilterV.Load()
+	}
+	if f := c.natFilterV.Load(); f != 0 {
+		return 0, f
+	}
+	c.stationMu.RLock()
+	defer c.stationMu.RUnlock()
+	for _, u := range c.stationURLs {
+		if u == nil {
+			continue
+		}
+		nm, nf := u.GetInt("natm"), u.GetInt("natf")
+		if nm != 0 || nf != 0 {
+			return uint32(nm), uint32(nf)
+		}
+	}
+	return 0, 0
 }
 
 // NewConnection creates a connection whose outbound packets are written via send
@@ -323,7 +384,7 @@ func (c *Connection) processSYN(p *Packet) {
 		// the client completes the handshake but then sends its CONNECT with an EMPTY
 		// payload — it never hands over its Kerberos ticket, so the session is never
 		// really authenticated (which is what forced the PID-by-IP workaround). Wire
-		// measurement of the secure connection with the client held constant: proven server
+		// measured of the secure connection with the client held constant: proven server
 		// SYN-ACK ACK|HASSIZE -> CONNECT plen=104; ours SYN-ACK ACK -> CONNECT plen=0,
 		// the only remaining difference across the whole handshake.
 		Flags:      FlagACK | FlagHasSize,
@@ -393,14 +454,14 @@ func (c *Connection) processLoginRequest(payload []byte) ([]byte, error) {
 			c.PID = pid
 			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> inherited auth pid=%d\n", c.RemoteAddr, c.PID)
 		} else if pid, ok := RecallRecentAuthPID(); ok {
-			// Per-IP recall missed because the auth was fronted by a proxy (Traefik on :443)
+			// Per-IP recall missed because the auth was fronted by a proxy (the reverse proxy on :443)
 			// so it was remembered under the proxy's IP, while this secure CONNECT arrives on
 			// the host-published port with the real IP. Fall back to the just-minted login PID
 			// so the console still owns its own session (no placeholder -> no SessionKeepFailed).
 			c.PID = pid
 			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> recent auth pid=%d\n", c.RemoteAddr, c.PID)
 		} else {
-			c.PID = 1800000000 + placeholderPIDCounter.Add(1)
+			c.PID = 1800000000 + atomic.AddUint64(&placeholderPIDCounter, 1)
 			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> placeholder pid=%d\n", c.RemoteAddr, c.PID)
 		}
 		return []byte{}, nil
@@ -566,14 +627,14 @@ func (c *Connection) sendData(data []byte) {
 			rest = rest[fragSize:]
 			fragmentID++
 			// FIXED pacing between fragments, matching the proven server EXACTLY: the
-			// the previous stack blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
+			// the previous stack measured blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
 			// ~200 ms at a steady ~16 ms/fragment, in strict order, WITHOUT stopping to
 			// wait for acks. Ack-driven windowing here instead took ~2.2 s, which tripped
-			// SSBU's native DataStore-fetch watchdog and crashed Ryujinx (the small
+			// SSBU's native DataStore-fetch watchdog and crashed the emulator (the small
 			// single-fragment arena responses were unaffected, which is why arenas worked
 			// but quick match didn't). retransmitLoop still backstops any dropped fragment.
-			if c.Endpoint.FragmentPacing > 0 {
-				time.Sleep(c.Endpoint.FragmentPacing)
+			if fragmentPacing > 0 {
+				time.Sleep(fragmentPacing)
 			}
 		}
 	}()
@@ -590,7 +651,7 @@ func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 		// NOT HasSize (0x8). With HasSize the console reads our plen field per fragment
 		// instead of the WebSocket frame length, which corrupts reassembly of a large
 		// multi-fragment payload (SSBU's 15 KB DataStore init) — it acks every fragment
-		// but never accepts the message. Match the reference exactly.
+		// but never accepts the message. Match the measured exactly.
 		Flags:      FlagReliable | FlagNeedACK,
 		SourceType: c.srcType, SourcePort: c.srcPort,
 		DestType: c.dstType, DestPort: c.dstPort,

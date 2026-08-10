@@ -38,7 +38,7 @@ func ipHost(addr string) string {
 
 // recentAuthPID / recentAuthUnix track the MOST RECENT LoginEx PID (any IP): a ticketless secure
 // CONNECT reaches the host-published port with the console's REAL IP, but the auth arrived via
-// the Traefik proxy's internal IP (10.0.1.x), so the per-IP recall above misses. The auth->connect
+// the reverse proxy's internal IP (127.0.0.1), so the per-IP recall above misses. The auth->connect
 // handshake is near-instant, so recalling the just-minted PID within a few seconds keeps session
 // ownership = the console (best-effort when many consoles log in at the exact same moment).
 var (
@@ -161,9 +161,13 @@ func (cfg *AuthConfig) handleLoginWithContext(conn *Connection, req *RMCMessage)
 	_ = in.U32() // structure header: content length
 	_ = in.U32() // PlatformType
 	username := in.String()
-	fmt.Printf("[Auth] ValidateAndRequestTicketWithParam username=%q\n", username)
+	// ExtraData follows the username (an AuthenticationInfo DataHolder carrying the
+	// BAAS id_token). Previously discarded; we now forward it so ResolveUser can verify
+	// the cryptographic account binding (the nx2 token in the id_token's "nnex" claim).
+	extraData := in.ReadAll()
+	fmt.Printf("[Auth] ValidateAndRequestTicketWithParam username=%q extraDataLen=%d\n", username, len(extraData))
 
-	pid, sourceKey, ok := cfg.ResolveUser(username, nil)
+	pid, sourceKey, ok := cfg.ResolveUser(username, extraData)
 	if !ok {
 		return NewRMCError(s, ProtocolTicketGranting, req.CallID, ResultAuthTokenParseError)
 	}

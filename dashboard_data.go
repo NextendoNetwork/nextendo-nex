@@ -11,7 +11,8 @@ type GatheringInfo struct {
 	HostPID      uint64
 	Participants []uint64
 	GameMode     uint32
-	VR           uint32 // matchmake attribute[1] (the versus/battle rating searched with)
+	VR           uint32   // matchmake attribute[1] (the versus/battle rating searched with)
+	Attribs      []uint32 // full MatchmakeSession attribute array (region/mode diagnostics)
 	MaxPart      uint16
 	State        uint32
 	Code         string // private-room code (empty for public sessions)
@@ -37,6 +38,7 @@ func (m *Matchmaking) Snapshot() []GatheringInfo {
 			Participants: append([]uint64(nil), g.participants...),
 			GameMode:     g.session.GameMode,
 			VR:           vr,
+			Attribs:      append([]uint32(nil), g.session.Attribs...),
 			MaxPart:      g.session.MaxParticipants,
 			State:        g.session.State,
 			Code:         g.code,

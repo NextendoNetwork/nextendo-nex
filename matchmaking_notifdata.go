@@ -83,15 +83,46 @@ func (m *Matchmaking) updateNotificationData(conn *Connection, req *RMCMessage) 
 		return NewRMCError(s, ProtocolMatchmakeExtension, req.CallID, ResultCoreInvalidArgument)
 	}
 
-	m.notif.put(conn.PID, typ, &NotificationEvent{
+	ev := &NotificationEvent{
 		PIDSource: conn.PID,
 		Type:      typ,
 		Param1:    p1,
 		Param2:    p2,
 		StrParam:  str,
-	})
+	}
+	m.notif.put(conn.PID, typ, ev)
 	fmt.Printf("[MM] notification publiée pid=%d type=%d param1=%d param2=%d\n", conn.PID, typ, p1, p2)
+	// POUSSE en temps réel aux amis EN LIGNE, comme le serveur the previous stack de référence : il n'attend
+	// pas le polling (méthode 13), il envoie un ProcessNotificationEvent dès qu'un ami publie sa
+	// présence. Mesuré sur measured : le type poussé = type_publié × 1000 (101 -> 101000, 109 ->
+	// 109000). Sans ça la Pia d'ACNH n'a jamais l'événement de présence temps réel de l'hôte que
+	// le visiteur attend pour finaliser la visite.
+	m.pushNotifDataToFriends(conn, ev)
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, nil)
+}
+
+// pushNotifDataToFriends envoie l'événement de présence de l'appelant à chacun de ses amis EN
+// LIGNE (ProcessNotificationEvent). Type poussé = type × 1000 (forme mesurée sur the previous stack). Sans
+// source d'amis (autres jeux), ne fait rien.
+func (m *Matchmaking) pushNotifDataToFriends(conn *Connection, ev *NotificationEvent) {
+	if m.FriendPIDs == nil {
+		return
+	}
+	pushed := 0
+	for _, friend := range m.FriendPIDs(conn.PID) {
+		target := conn.Endpoint.FindConnectionByPID(friend)
+		if target == nil {
+			continue
+		}
+		SendNotification(target, &NotificationEvent{
+			PIDSource: ev.PIDSource, Type: ev.Type * 1000,
+			Param1: ev.Param1, Param2: ev.Param2, StrParam: ev.StrParam,
+		})
+		pushed++
+	}
+	if pushed > 0 {
+		fmt.Printf("[MM] présence pid=%d POUSSÉE à %d ami(s) en ligne (type=%d)\n", conn.PID, pushed, ev.Type*1000)
+	}
 }
 
 // friendNotificationsFor collecte les données publiées par les AMIS de l'appelant pour les
@@ -144,5 +175,15 @@ func (m *Matchmaking) getFriendNotificationData(conn *Connection, req *RMCMessag
 		out.Add(ev)
 	}
 	fmt.Printf("[MM] notifications d'amis pid=%d types=%v -> %d entrée(s)\n", conn.PID, types, len(events))
-	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+	resp := NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+	// En plus de la réponse au polling, POUSSE chaque présence d'ami au demandeur (comme the previous stack,
+	// qui envoie un ProcessNotificationEvent type=×1000 par ami en ligne). Envoyé après la réponse
+	// pour ne pas s'intercaler dedans.
+	for _, ev := range events {
+		SendNotification(conn, &NotificationEvent{
+			PIDSource: ev.PIDSource, Type: ev.Type * 1000,
+			Param1: ev.Param1, Param2: ev.Param2, StrParam: ev.StrParam,
+		})
+	}
+	return resp
 }

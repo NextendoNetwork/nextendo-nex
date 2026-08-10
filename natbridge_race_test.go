@@ -32,11 +32,11 @@ func hostAfterReplaceURL() []*StationURL {
 func TestBridgeReportsWhetherItCouldSubstitute(t *testing.T) {
 	writeNatFile(t, "203.0.113.9 49275\n")
 
-	if _, status := natBridgeStations(hostBeforeReplaceURL()); status != bridgeNoRVCID {
+	if _, status := natBridgeStations(hostBeforeReplaceURL(), false); status != bridgeNoRVCID {
 		t.Error("a host with no RVCID must report bridgeNoRVCID so the caller waits for it")
 	}
 
-	urls, status := natBridgeStations(hostAfterReplaceURL())
+	urls, status := natBridgeStations(hostAfterReplaceURL(), false)
 	if status != bridgeOK {
 		t.Fatal("a host that reported its ReplaceURL must be bridgeable")
 	}
@@ -54,7 +54,7 @@ func TestJoinerIsAnsweredOnceTheHostReportsItsReplaceURL(t *testing.T) {
 	host.SetStations(hostBeforeReplaceURL())
 
 	// Not bridgeable yet.
-	if _, status := natBridgeStations(host.Stations()); status != bridgeNoRVCID {
+	if _, status := natBridgeStations(host.Stations(), false); status != bridgeNoRVCID {
 		t.Fatal("host is not ready; bridge must report the RVCID shortfall")
 	}
 
@@ -68,7 +68,7 @@ func TestJoinerIsAnsweredOnceTheHostReportsItsReplaceURL(t *testing.T) {
 	var bridged bool
 	for time.Now().Before(deadline) {
 		time.Sleep(hostReplaceURLPoll)
-		if _, status := natBridgeStations(host.Stations()); status == bridgeOK {
+		if _, status := natBridgeStations(host.Stations(), false); status == bridgeOK {
 			bridged = true
 
 			break

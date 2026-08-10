@@ -22,7 +22,7 @@ import (
 // up: it stops after MatchMakingExt m=1 and re-registers in a loop until the game shows a
 // connection error. That is the exact shape of the MK8 worldwide failure, and it is why
 // worldwide broke when MK8 moved to this core — the previous stack had this bridge
-// (the reference implementation had it), and it was not ported.
+// (the previous stack), and it was not ported.
 //
 // The file is written by the nncs responder co-located with the game server
 // (NNCS_NAT_FILE). It MUST be local: a responder on another host cannot share it.
@@ -81,11 +81,6 @@ func natPortForIP(ip string) (int, bool) {
 			natCache = map[string]int{}
 			natCacheRead = time.Now()
 
-			if natCache == nil {
-				fmt.Printf("[natbridge] WARNING: NAT file %s not readable (%v) — "
-					+"no UDP endpoint observations available. P2P joins will use raw TCP ports.\n",
-					natFilePath(), err)
-			}
 			return 0, false
 		}
 
@@ -122,7 +117,7 @@ func natPortForIP(ip string) (int, bool) {
 // Returns the urls untouched whenever it cannot do better — no NAT observation, no
 // private address, no RVCID. A wrong port is a broken match; the raw URLs are at least
 // what the previous behaviour handed out.
-func natBridgeStations(urls []*StationURL) ([]*StationURL, bridgeStatus) {
+func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bridgeStatus) {
 	local, public := selectStations(urls)
 	if local == nil || public == nil {
 		// Both candidates are required. A host reporting only one usually means its
@@ -160,27 +155,48 @@ func natBridgeStations(urls []*StationURL) ([]*StationURL, bridgeStatus) {
 		return urls, bridgeNoRVCID
 	}
 
-	lan := public.Copy()
-	lan.Set("address", privateAddr)
+	// La station LAN se construit à partir de la station LOCALE de l'hôte (son ReplaceURL), PAS de
+	// la publique : elle porte déjà l'adresse privée, les vrais natf/natm de l'hôte, le RVCID et —
+	// surtout — le CID (l'identifiant de connexion de l'hôte dont la Pia du visiteur a besoin pour
+	// MONTER la session P2P après le perçage). L'ancien code copiait la station publique et
+	// PERDAIT ce CID : le visiteur perçait le NAT mais la session Pia ne se montait jamais →
+	// « console ne répond pas » (2618-0502). On n'échange que le port UDP (celui observé par nncs) ;
+	// type/Pa sont retirés pour que la console reconnaisse le candidat LOCAL (une URL LAN portant
+	// type=public fait sauter le candidat par Pia). Prouvé par la measured the previous stack GetSessionURLs :
+	// LAN = address=<privée>;port=<udp>;CID=<cid du ReplaceURL>;RVCID.
+	lan := local.Copy()
 	lan.SetInt("port", udpPort)
-	lan.SetInt("RVCID", cid)
-	lan.Set("natf", "34")
-	lan.Set("natm", "1")
 	lan.Remove("type")
 	lan.Remove("Pa")
 
 	pub := public.Copy()
 	pub.SetInt("port", udpPort)
 	pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
-	pub.Set("Pa", privateAddr)
+	// Pa mirrors the proven server. MK8/S2 send Pa=<private> (the default); ACNH's Pia
+	// instead reads the public candidate's Pa as the endpoint to reach, so it must be the
+	// PUBLIC address — the previous stack server ACNH is known to work against sends address==Pa==
+	// public (measured acnh nexgo_reference.bin). Pa=<private> there sends the joiner's probe
+	// to the host's LAN address and stalls it at "getting ready to depart" (2618-0502).
+	pa := privateAddr
+	if publicFirst {
+		pa = publicAddr
+	}
+	pub.Set("Pa", pa)
 
 	// Say so on every substitution. Whether this bridge fires is the whole difference
 	// between a joinable host and a session that stalls at MatchMakingExt m=1, and it
 	// depends on a file written by another process — so it must be visible in the log
 	// rather than inferred from players reporting that it works.
-	fmt.Printf("[natbridge] %s: registered tcp port %d -> observed udp port %d (lan=%s rvcid=%d)\n",
-		publicAddr, public.GetInt("port"), udpPort, privateAddr, cid)
+	fmt.Printf("[natbridge] %s: registered tcp port %d -> observed udp port %d (lan=%s rvcid=%d, publicFirst=%v)\n",
+		publicAddr, public.GetInt("port"), udpPort, privateAddr, cid, publicFirst)
 
+	// Station order. MK8/S2 take [lan, public] (the default). ACNH's Pia treats the FIRST
+	// station as the primary P2P candidate and never falls through to the second, so a
+	// remote joiner handed [lan, ...] probes the unreachable 192.168.x address and fails;
+	// the previous stack server ACNH works against sends [public, lan]. Reproduce that here.
+	if publicFirst {
+		return []*StationURL{pub, lan}, bridgeOK
+	}
 	return []*StationURL{lan, pub}, bridgeOK
 }
 

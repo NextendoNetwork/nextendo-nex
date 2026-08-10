@@ -8,9 +8,9 @@
 /bin/
 /dist/
 
-# Captured / raw binary data
+# measured / raw binary data
 *.bin
-captured/
+measured/
 
 # Secrets & local config — never commit these
 .env

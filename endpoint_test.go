@@ -43,7 +43,7 @@ func dataPacket(payload []byte, packetID uint16) *Packet {
 	}
 }
 
-// decodeOne decodes exactly one packet from a sample frame.
+// decodeOne decodes exactly one packet from a measured frame.
 func decodeOne(t *testing.T, frame []byte) *Packet {
 	t.Helper()
 	packets, _, err := DecodePackets(frame)

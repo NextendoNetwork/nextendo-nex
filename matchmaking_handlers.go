@@ -44,8 +44,8 @@ const (
 	// UpdateApplicationBuffer(gid, buffer) is how a HOST publishes its match configuration
 	// into the gathering — Smash sends ~422 bytes of it as soon as a lobby forms. Joiners
 	// read it back off the session, so refusing it leaves them with a session they cannot
-	// interpret and the lobby loops back to matchmaking (2618-0006). The previous stack
-	// implemented it (the reference implementation did)
+	// interpret and the lobby loops back to matchmaking (2618-0006). The the previous stack
+	// implemented it (the previous stack)
 	// and this core did not — a host's buffer was silently rejected on every lobby.
 	MethodUpdateApplicationBuffer uint32 = 0x0B
 
@@ -77,7 +77,7 @@ const (
 	MethodSSBUArenaCode     uint32 = 0x37 // arena code create (same struct as MK8 0x44)
 	MethodSSBUArenaResolve  uint32 = 0x38 // resolve arena code → bare u32 gid (like 0x45)
 	MethodFindByGidList     uint32 = 0x30 // FindMatchmakeSessionByGatheringID (list<gid> → list<session>)
-	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (observed value)
+	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (measured Nintendo value)
 
 	// MatchMakingExt (0x32)
 	MethodEndParticipation uint32 = 0x1
@@ -104,6 +104,19 @@ type Matchmaking struct {
 	// l'hôte ; Splatoon 2 n'appelle cette méthode qu'en fin de partie coop, où seul
 	// l'acquittement compte — d'où le défaut à false, qui laisse S2 inchangé.
 	SessionPartPersists bool
+	// PublicStationFirst met la station PUBLIQUE en TÊTE de la liste rendue par
+	// GetSessionURLs (et pose Pa=<adresse publique>), au lieu de [lan, public]/Pa=<privée>.
+	// La Pia d'Animal Crossing prend la 1ʳᵉ station comme candidat P2P primaire et lit le Pa
+	// du candidat public comme cible : sans ça le visiteur sonde l'IP LAN de l'hôte et cale
+	// sur « Getting ready to depart » (2618-0502). MK8/S2 gardent le défaut (false), forme
+	// éprouvée contre leur serveur.
+	PublicStationFirst bool
+	// JoinRespExistingCount fait renvoyer, dans la réponse à JoinMatchmakeSessionWithParam, le
+	// nombre de participants AVANT l'ajout du visiteur (comme the previous stack) au lieu d'après. La Pia
+	// d'Animal Crossing dimensionne son maillage P2P sur ce nombre : compté inclus, le visiteur
+	// attend une « autre console » fantôme et échoue (2618-0502). Défaut false : MK8 (AutoMatchmake)
+	// et SSBU gardent le comptage après-ajout avec lequel ils fonctionnent.
+	JoinRespExistingCount bool
 	// FriendPIDs fournit la liste d'amis d'un joueur, pour les données de notification
 	// entre amis (méthodes 9/10/13). nil = aucun ami, donc listes vides : le comportement
 	// des jeux qui n'utilisent pas ce mécanisme.
@@ -349,7 +362,7 @@ func (m *Matchmaking) createGathering(conn *Connection, src *MatchmakeSession) *
 // when a new player (not the owner) joins — the event Pia's WaitNotification
 // blocks on. The joiner is never notified of its own join.
 // notifyParticipation replicates the proven server's join notifications, taken
-// byte-for-byte from a live 2-player session:
+// byte-for-byte from a live 2-player measured:
 //  1. Participate(3001) about the CALLER (Param2=caller) -> pushed to EVERY current
 //     participant, INCLUDING the caller itself. The deployed server does NOT self-
 //     exclude: a lone host needs its own event to leave Pia's WaitNotification wall
@@ -388,6 +401,91 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 		gid, caller.PID, count, count-1, participants)
 }
 
+// [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to
+// another Strict peer, nor reliably to a Moderate one — so dropping such a pair into the same
+// lobby gives EVERYONE in it "A communication error has occurred" (2618-0510). We classify each
+// peer from its ReportNATProperties (natMap/natFilter — same buckets as the monitoring site) and
+// refuse to place a joiner into a lobby it cannot reach; it then looks for another lobby, and if
+// none is compatible it opens its own (so a bad-NAT player no longer poisons everyone else).
+type natClass int
+
+const (
+	natUnknown natClass = iota // not reported yet -> stay optimistic (fail-open)
+	natOpen
+	natModerate
+	natStrict
+)
+
+func (c natClass) String() string {
+	switch c {
+	case natOpen:
+		return "open"
+	case natModerate:
+		return "moderate"
+	case natStrict:
+		return "strict"
+	default:
+		return "unknown"
+	}
+}
+
+// classifyNAT buckets a client's reported NAT behaviour. Mirrors the dashboard's natTypeLabel:
+// (0,0)=unknown, map&filter<=1=open, map<=1=moderate, else strict (symmetric mapping).
+func classifyNAT(natMap, natFilter uint32) natClass {
+	if natMap == 0 && natFilter == 0 {
+		return natUnknown
+	}
+	if natMap <= 1 && natFilter <= 1 {
+		return natOpen
+	}
+	if natMap <= 1 {
+		return natModerate
+	}
+	return natStrict
+}
+
+// natCompatible reports whether two peers can likely hole-punch each other. Unknown is
+// optimistic (fail-open, so we never wrongly isolate a player we can't yet classify). Only the
+// pairs that reliably fail are rejected: strict×strict and strict×moderate.
+func natCompatible(a, b natClass) bool {
+	if a == natUnknown || b == natUnknown {
+		return true
+	}
+	if a == natStrict && (b == natStrict || b == natModerate) {
+		return false
+	}
+	if b == natStrict && (a == natStrict || a == natModerate) {
+		return false
+	}
+	return true
+}
+
+// pidNATClass reads a participant's NAT class from its live connection (unknown if it's gone).
+func pidNATClass(ep *Endpoint, pid uint64) natClass {
+	if ep == nil {
+		return natUnknown
+	}
+	c := ep.FindConnectionByPID(pid)
+	if c == nil {
+		return natUnknown
+	}
+	return classifyNAT(c.NATBehaviour())
+}
+
+// gatheringNATCompatible reports whether a joiner of the given class can hole-punch with EVERY
+// current member of the gathering.
+func gatheringNATCompatible(ep *Endpoint, joiner natClass, members []uint64, joinerPID uint64) bool {
+	for _, pid := range members {
+		if pid == joinerPID {
+			continue
+		}
+		if !natCompatible(joiner, pidNATClass(ep, pid)) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
 	var param AutoMatchmakeParam
@@ -398,20 +496,47 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 	}
 	src := &param.Session
 
+	// [Nextendo] NAT-aware: the joiner's own class, and the endpoint used to look up members.
+	ep := conn.Endpoint
+	joinerClass := classifyNAT(conn.NATBehaviour())
+
 	m.mu.Lock()
 	var g *gathering
-	for _, cand := range m.gatherings {
-		if cand.session.GameMode == src.GameMode &&
-			cand.session.OpenParticipation &&
-			!cand.session.UserPasswordEnabled &&
-			uint16(len(cand.participants)) < cand.session.MaxParticipants {
-			g = cand
-			break
+	skippedNAT := 0
+	// [Nextendo] A solo-isolated PID (NEX_SOLO_PIDS) never joins an existing lobby: it always
+	// opens its own gathering. Gives a private test account a reliable solo online lobby on a
+	// SHARED server, sidestepping the P2P/NAT hole-punch that fails (2618-0521) when it gets
+	// matched with real, unreachable consoles.
+	soloForced := isSoloPID(conn.PID)
+	if !soloForced {
+		for _, cand := range m.gatherings {
+			if cand.session.GameMode == src.GameMode &&
+				cand.session.OpenParticipation &&
+				!cand.session.UserPasswordEnabled &&
+				uint16(len(cand.participants)) < cand.session.MaxParticipants {
+				// Skip a lobby the joiner can't hole-punch with (would give everyone 2618-0510);
+				// keep looking for a compatible one.
+				if !gatheringNATCompatible(ep, joinerClass, cand.participants, conn.PID) {
+					skippedNAT++
+					continue
+				}
+				g = cand
+				break
+			}
 		}
 	}
 	joined := false
 	if g == nil {
 		g = m.createGathering(conn, src)
+		if soloForced {
+			// Le client demande minP=2 → une partie solo (count=1) ne démarre jamais et re-matchmake
+			// en boucle. On force minP=1 pour ce PID isolé : count=1 suffit → la course démarre solo.
+			g.session.MinParticipants = 1
+			fmt.Printf("[MM] solo-isolate: pid=%d -> own gid=%d minP=1 (skip join, test account)\n", conn.PID, g.session.ID)
+		} else if skippedNAT > 0 {
+			fmt.Printf("[MM] NAT-aware: pid=%d class=%s incompatible with %d open lobby(ies) -> opened own gid=%d\n",
+				conn.PID, joinerClass, skippedNAT, g.session.ID)
+		}
 	} else if !containsPID(g.participants, conn.PID) {
 		g.participants = append(g.participants, conn.PID)
 		joined = true
@@ -472,13 +597,31 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 		m.mu.Unlock()
 		return NewRMCError(s, ProtocolMatchmakeExtension, req.CallID, ResultRendezVousSessionVoid)
 	}
+	existing := len(g.participants) // participants DÉJÀ présents, AVANT d'ajouter l'appelant
 	joined := false
 	if !containsPID(g.participants, conn.PID) {
+		// Refuser d'entrer dans un salon PLEIN. Sans ce garde-fou, le Join direct (friend-join,
+		// join par code) empile un joueur au-delà du maximum de la session — relevé en prod : un
+		// salon en 9/8. On respecte le MaxParticipants PROPRE à la session (fixé par le jeu) :
+		// 12 pour MK8, 8 pour Splatoon 2 (10 en privé), la taille configurée pour Smash/Salmon Run.
+		// Le client rebascule alors sur un autre salon au lieu de casser un match plein.
+		if g.session.MaxParticipants > 0 && uint16(len(g.participants)) >= g.session.MaxParticipants {
+			m.mu.Unlock()
+			return NewRMCError(s, ProtocolMatchmakeExtension, req.CallID, ResultRendezVousSessionFull)
+		}
 		g.participants = append(g.participants, conn.PID)
 		joined = true
 	}
 	g.session.NumParticipants = uint32(len(g.participants))
 	result := *g.session
+	// La réponse au JOIN doit annoncer le nombre de participants tel que le serveur the previous stack de
+	// référence le renvoie : le compte AVANT ajout du visiteur (juste l'hôte = 1), PAS après (2).
+	// La Pia d'Animal Crossing bâtit son maillage P2P d'après ce nombre : compté inclus (2), le
+	// visiteur attend une 2ᵉ « autre console » qui n'existe pas et échoue sur « one or more other
+	// consoles are not responding » (2618-0502). Mesuré : the previous stack Join/39 = NumParticipants 1.
+	if m.JoinRespExistingCount && joined {
+		result.NumParticipants = uint32(existing)
+	}
 	parts := append([]uint64(nil), g.participants...)
 	out := NewStreamOut(s)
 	out.Add(&result)
@@ -580,7 +723,13 @@ func (m *Matchmaking) browseNoHolder(conn *Connection, req *RMCMessage) *RMCMess
 			continue
 		}
 		r := *g.session
-		r.SessionKey = nil
+		// Recherche par Dodo Code (ACNH, wantCode!="") : le demandeur détient le code, il est
+		// donc autorisé à rejoindre → on GARDE la clé de session, comme the previous stack et comme
+		// findByParticipant, sinon la visite cale (2618-0502). Recherche publique sans code
+		// (arène Smash) : on la retire pour ne pas la divulguer à un simple scan.
+		if wantCode == "" {
+			r.SessionKey = nil
+		}
 		r.UserPassword = ""
 		sessions = append(sessions, &r)
 	}
@@ -673,14 +822,8 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	// Hand over the host's REAL UDP endpoint, not the WebSocket TCP port it registered:
 	// the latter is unreachable for Pia's hole-punch, so the joiner's probe never lands
 	// and the console stalls at MatchMakingExt m=1.
-	urls, status := natBridgeStations(host.Stations())
+	urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst)
 	if status != bridgeNoRVCID {
-		switch status {
-		case bridgeOK:
-			fmt.Printf("[MM] GetSessionURLs pid=%d: host found in NAT bridge — delivering REAL UDP endpoint (direct P2P enabled)\n", conn.PID)
-		default:
-			fmt.Printf("[MM] GetSessionURLs pid=%d: NAT bridge unavailable (%v) — delivering raw station URLs (relay fallback, P2P disabled)\n", conn.PID, status)
-		}
 		// Either it worked, or nothing a moment brings will change it.
 		return sessionURLsResponse(conn, req, urls)
 	}
@@ -716,7 +859,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 	for time.Now().Before(deadline) {
 		time.Sleep(hostReplaceURLPoll)
 
-		if urls, status := natBridgeStations(host.Stations()); status == bridgeOK {
+		if urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst); status == bridgeOK {
 			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
 			conn.SendRMC(sessionURLsResponse(conn, req, urls))
 

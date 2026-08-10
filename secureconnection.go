@@ -28,7 +28,7 @@ const (
 type SecureConnectionConfig struct {
 	// PublicStationType is the `type` param on the public station. Switch Pia 5.19 (SSBU)
 	// wants 0x0B (BehindNAT|Public|Switch); older Pia (Splatoon 2) wants the Wii U-era 0x03
-	// (BehindNAT|Public). Measurement with the client held constant: the proven S2 server
+	// (BehindNAT|Public). measurement with the client held constant: the proven S2 server
 	// answers type=3, the proven SSBU one type=11.
 	PublicStationType uint8
 	// SetPa adds Pa=<address> to the public station. Pia 5.19 needs it to build the NAT
@@ -118,7 +118,7 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 		// one, and Pa ends up being the public address. We reproduce the resulting value, not
 		// the aliasing, so `local` stays a real LAN station for the P2P bridge. When the client
 		// DOES report its own public station, Pa is the LAN address, which is what a real
-		// console sends (a real console's public and local station address).
+		// console sends (measured a measurement: address=203.0.113.20, Pa=10.0.0.108).
 		// NOTE: both Pa variants are known to work on SSBU — the real console sends Pa=<LAN>
 		// and the proven server sends Pa=<public> — so the VALUE is not load-bearing there.
 		pa := local.Get("address")

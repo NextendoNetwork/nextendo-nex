@@ -116,7 +116,7 @@ func NowDateTime() DateTime {
 // ---------------------------------------------------------------------------
 
 // StationURL is a NEX station address of the form "scheme:/k=v;k=v". Parameter
-// insertion order is preserved so the serialized form round-trips a trace.
+// insertion order is preserved so the serialized form round-trips a measured.
 type StationURL struct {
 	Scheme string
 	keys   []string

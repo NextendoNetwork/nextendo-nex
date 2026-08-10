@@ -23,7 +23,7 @@ const (
 // The password only has to be stable and to match what we hand out: nothing verifies it
 // against a store, because the id IS the account's PID and the account is already
 // authenticated by its Kerberos ticket before any of this runs. Same constant as the
-// previous stack, so an account that acquired its id there keeps working here.
+// the previous stack, so an account that acquired its id there keeps working here.
 const nexUniqueIDPasswordSalt uint64 = 0x4e45585f50574421
 
 // UniqueIDInfo is the Utility structure returned by AcquireNexUniqueIDWithPassword:
