@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// placeholderPIDCounter assigns anonymous PIDs to secure connections that arrive
-// without a valid Kerberos ticket (private-test leniency).
-var placeholderPIDCounter uint64
-
 // fragmentPacing is the delay inserted between successive fragments of a large reliable
 // response. Blasting every fragment of a big payload (e.g. SSBU's 15.7 KB DataStore init
 // = 13 fragments) at once overflows the console's small PRUDP window, the overflow is
@@ -67,9 +63,9 @@ type Endpoint struct {
 	// each player's NAT type and latency (lost when the games moved off the previous stack).
 	OnNATProperties func(pid uint64, natMap, natFilter, rtt uint32)
 
-	handlers       map[uint16]RMCHandler
+	handlers        map[uint16]RMCHandler
 	fallbackHandler RMCHandler
-	mu             sync.RWMutex
+	mu              sync.RWMutex
 
 	// customPacketHandlers handle non-standard PRUDP packet types (e.g. SSBU's Pia
 	// 5.19 type-8 keepalive, which the base SYN/CONNECT/DATA/PING/DISCONNECT switch
@@ -466,28 +462,27 @@ func (c *Connection) processLoginRequest(payload []byte) ([]byte, error) {
 		return []byte{}, nil
 	}
 
-	// Private-test leniency: the console currently connects to the secure server
-	// WITHOUT a Kerberos ticket (empty CONNECT) because the source-key exchange
-	// isn't matched to its token derivation yet. Accept it anonymously so it can
-	// still reach matchmaking. Per PRUDP, an empty CONNECT expects an empty
-	// response (the console does not check a value in this case).
+	// Ticketless CONNECT. Some consoles reach the secure server WITHOUT a Kerberos ticket
+	// (empty CONNECT) because their source-key exchange isn't matched to our token
+	// derivation yet, so we still accept it — but ONLY as the identity that authenticated
+	// from this very address, and only within authRecallTTL.
+	//
+	// SECURITY: the CONNECT signature proves knowledge of the access key, which every game
+	// client embeds — it is NOT proof of identity. So an empty CONNECT must never be able to
+	// name an identity of its own. Two earlier fallbacks did exactly that and are removed:
+	// an address-agnostic "most recently minted login PID" recall, and a placeholder PID
+	// allocated inside the account range. Either let a client that never authenticated take
+	// over another player's account. A ticketless CONNECT with no matching recall is now
+	// refused; the client must present a real ticket.
 	if len(payload) == 0 {
-		if pid, ok := RecallAuthPID(c.RemoteAddr); ok {
-			// Same client authed a moment ago on the auth server: reuse that PID so
-			// the session it hosts is owned by the console's real identity.
-			c.PID = pid
-			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> inherited auth pid=%d\n", c.RemoteAddr, c.PID)
-		} else if pid, ok := RecallRecentAuthPID(); ok {
-			// Per-IP recall missed because the auth was fronted by a proxy (the reverse proxy on :443)
-			// so it was remembered under the proxy's IP, while this secure CONNECT arrives on
-			// the host-published port with the real IP. Fall back to the just-minted login PID
-			// so the console still owns its own session (no placeholder -> no SessionKeepFailed).
-			c.PID = pid
-			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> recent auth pid=%d\n", c.RemoteAddr, c.PID)
-		} else {
-			c.PID = 1800000000 + atomic.AddUint64(&placeholderPIDCounter, 1)
-			fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> placeholder pid=%d\n", c.RemoteAddr, c.PID)
+		pid, ok := RecallAuthPID(c.RemoteAddr)
+		if !ok {
+			return nil, fmt.Errorf("connect: ticketless CONNECT with no recent auth from this address")
 		}
+		// Same client authed a moment ago on the auth server: reuse that PID so
+		// the session it hosts is owned by the console's real identity.
+		c.PID = pid
+		fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> inherited auth pid=%d\n", c.RemoteAddr, c.PID)
 		return []byte{}, nil
 	}
 
