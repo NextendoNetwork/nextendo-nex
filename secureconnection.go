@@ -34,6 +34,32 @@ type SecureConnectionConfig struct {
 	// SetPa adds Pa=<address> to the public station. Pia 5.19 needs it to build the NAT
 	// probe; the proven S2 server sends NO Pa at all.
 	SetPa bool
+	// PublicHost is the server's own public IP (NEXTENDO_HOST). A host co-located with
+	// this server hairpins through its own router, so its probes arrive from a private
+	// address and its game reports a VPN-looking LAN address (Radmin/Hamachi/ZeroTier)
+	// as both local and public — a pair the natbridge cannot split, and a public
+	// candidate no peer can reach. When set, Register/ReplaceURL repoint such hosts at
+	// this address. Empty = no correction.
+	PublicHost string
+	// P2PAnchorPort is a fixed UDP port that stays bound, FORWARDED and RESPONDING for
+	// P2P probes (the nncs responder also serves it). The game's resolve job probes its
+	// station URLs with the same 16-byte probe format it uses on nncs, and S2 accepts
+	// the resolve only when every reply reports the SAME client source port (it never
+	// checks which IP the reply came from). A co-located host's own station — its
+	// VPN/LAN address — is unreachable or unresponsive, so the resolve never sees a
+	// consistent port and the host dies with 2618-201 after a few retry bursts. The
+	// anchor points the station at a port our responder answers, so the resolve always
+	// completes. 0 = disable (pass the host's own stations through, stock behaviour).
+	P2PAnchorPort int
+	// P2PRelay makes the server stand in for EVERY host's station — not just a
+	// co-located one. Register stores the public station at PublicHost:P2PAnchorPort
+	// (the server's relay socket) for all hosts, so every client's resolve probes,
+	// punch attempts and station traffic land on the relay port, which the game
+	// server forwards between peers. This is what connects two players who are both
+	// behind firewalled NATs with no port forwarding: neither can reach the other's
+	// real endpoint, but both can reach (and keep a NAT mapping toward) the server.
+	// Requires PublicHost and P2PAnchorPort to be set. Disabled by default.
+	P2PRelay bool
 }
 
 // SwitchPia519Config is what SSBU (Pia 5.19) needs: type=0x0B plus Pa.
@@ -68,7 +94,7 @@ func SecureConnectionHandlerWithConfig(cfg SecureConnectionConfig) RMCHandler {
 		case MethodRegister, MethodRegisterEx:
 			return handleRegister(conn, req, cfg)
 		case MethodReplaceURL:
-			return handleReplaceURL(conn, req)
+			return handleReplaceURLWithConfig(conn, req, cfg)
 		default:
 			return notImplemented(conn, ProtocolSecureConnection, req)
 		}
@@ -83,6 +109,16 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 	local, public := selectStations(urls)
 	if local == nil {
 		local = NewStationURL("prudp")
+	}
+	// The Splatoon 2 client reports ONE station url — its LAN address — and this stack
+	// serves it for BOTH roles when that address does not look private (a VPN adapter):
+	// selectStations files the url under public, then the fallback picks the same
+	// pointer as local. A local/public pair that is the same OBJECT cannot be split by
+	// the natbridge (the addresses are identical), so Register must take the derived
+	// path: keep the url as local and synthesize a SEPARATE public copy. Without this
+	// the host's own NAT-keep sees a public station that matches nothing.
+	if local != nil && public != nil && (local == public || local.Get("address") == public.Get("address")) {
+		public = nil
 	}
 	// derivedPublic: the client reported no public station, so we synthesised one from
 	// the observed endpoint. It changes what Pa must be — see the Pa comment below.
@@ -131,12 +167,52 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 	}
 
 	conn.SetStations([]*StationURL{local, public})
-	fmt.Printf("[Register] pid=%d -> local=%s\n           public=%s\n", conn.PID, local.String(), public.String())
+	fixStationEndpoint(conn, local, public, cfg)
+
+	if cfg.P2PRelay && cfg.PublicHost != "" {
+		// Relay mode: the server stands in for this host's station, so point the
+		// STORED public station at the relay socket. Everything downstream then
+		// inherits the relay address: the natbridge hands out relay URLs at
+		// GetSessionURLs, and the 0x79 station records (via Stations()) carry them
+		// too — so ALL of a peer's station traffic lands on the relay port.
+		if cfg.P2PAnchorPort > 0 {
+			public.SetInt("port", cfg.P2PAnchorPort)
+		}
+		public.Set("address", cfg.PublicHost)
+	}
+
+	// The station Pia's resolve job probes (the response) and the station peers get
+	// (stored, via the natbridge) must differ for a host co-located with this server.
+	// Its probes hairpin through its own router, so the observed endpoint is the
+	// router's LAN address — useless as a station for the host itself (192.168.1.1 is
+	// the router, nothing listens there) AND for peers. The response must point at an
+	// address the host can actually probe-and-get-a-reply-from, which for a co-located
+	// host is the server's own public IP (hairpin delivers it back to this LAN).
+	respPublic := public.Copy()
+	if host, _, err := net.SplitHostPort(conn.RemoteAddr); err == nil {
+		switch {
+		case cfg.P2PRelay && cfg.PublicHost != "":
+			// Relay mode: respPublic is already a copy of the relay-pointed public
+			// station — the client's resolve job probes the relay and gets answered.
+		case isPrivateIP(host) && cfg.PublicHost != "":
+			respPublic.Set("address", cfg.PublicHost)
+			if cfg.P2PAnchorPort > 0 {
+				respPublic.SetInt("port", cfg.P2PAnchorPort)
+			}
+		default:
+			respPublic.Set("address", host)
+			if p, ok := natPortForIP(host); ok {
+				respPublic.SetInt("port", p)
+			}
+		}
+	}
+	fmt.Printf("[%s] [Register] pid=%d -> local=%s\n           stored=%s\n           resp=%s\n",
+		ts(), conn.PID, local.String(), public.String(), respPublic.String())
 
 	out := NewStreamOut(s)
-	out.U32(ResultCoreUnknown)  // retval (success)
-	out.U32(conn.ID)            // pidConnectionID (RVCID)
-	out.String(public.String()) // urlPublic
+	out.U32(ResultCoreUnknown)      // retval (success)
+	out.U32(conn.ID)                // pidConnectionID (RVCID)
+	out.String(respPublic.String()) // urlPublic
 	return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, out.Bytes())
 }
 
@@ -149,6 +225,10 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 // by ADDRESS with the new url winning for its address (keeps the fresh LAN url,
 // removes stale duplicates), matching the proven server.
 func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
+	return handleReplaceURLWithConfig(conn, req, SecureConnectionConfig{})
+}
+
+func handleReplaceURLWithConfig(conn *Connection, req *RMCMessage, cfg SecureConnectionConfig) *RMCMessage {
 	s := conn.Settings
 	in := NewStreamIn(req.Body, s)
 	_ = in.StationURLValue() // target (the url being replaced) — unused; we dedupe by address
@@ -157,6 +237,25 @@ func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
 		return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
 	}
 	newStation.SetInt("PID", int(conn.PID))
+	// The re-reported LAN url carries the same wrong VPN-looking address as Register did;
+	// repoint it so the dedupe keeps one local station the natbridge can pair with public.
+	fixStationAddressForEndpoint(conn, newStation, cfg)
+	// A REMOTE client re-reports its post-NAT LAN url (private address, real UDP port,
+	// RVCID) here. Store it pointing at the endpoint we actually observe — the private
+	// address is the one peers could never reach, and the port it carries is the one the
+	// NAT handshake confirmed. Register already does this for the public station; without
+	// it the host's ReplaceURL (192.168.0.20:58108 style) leaks into 0x79 station records
+	// and the joiner's direct mesh connection dies before it starts.
+	// In relay mode the observed IP is NOT what peers must reach (the server's relay
+	// socket is), so the LAN url stays as reported — it is the natbridge's local
+	// candidate and the source of the Pa value either way.
+	if !cfg.P2PRelay {
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
+			if a := newStation.Get("address"); a != host {
+				newStation.Set("address", host)
+			}
+		}
+	}
 	newAddr := newStation.Get("address")
 
 	byAddr := map[string]*StationURL{}
@@ -179,7 +278,7 @@ func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
 	}
 	conn.SetStations(rebuilt)
 
-	fmt.Printf("[ReplaceURL] pid=%d -> new=%s (now %d station(s))\n", conn.PID, newStation.String(), len(rebuilt))
+	fmt.Printf("[%s] [ReplaceURL] pid=%d -> new=%s (now %d station(s))\n", ts(), conn.PID, newStation.String(), len(rebuilt))
 	return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
 }
 
@@ -232,4 +331,59 @@ func isPrivateIP(addr string) bool {
 	}
 
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || cgnatRange.Contains(ip)
+}
+
+// fixStationEndpoint repoints a host's registered stations so its resolve job and its
+// peers can actually probe them. Run AFTER SetStations so the [Register] log shows the
+// corrected shape.
+//
+// A host co-located with this server probes through its own router, so every probe
+// arrives from a PRIVATE address (hairpin). Its game reports the address of the
+// interface the emulator chose — often a VPN adapter (Radmin 26.x, Hamachi 25.x,
+// ZeroTier 172.28.x) — as BOTH its local and public station. That shape breaks the
+// natbridge two ways: the local/public pair is identical (selectStations files both
+// under public), and the address is one no peer can route to. When cfg.PublicHost is
+// set, we repoint public at the server's own public IP and local at the observed
+// hairpin source, restoring the distinct private/public pair the natbridge needs.
+func fixStationEndpoint(conn *Connection, local, public *StationURL, cfg SecureConnectionConfig) {
+	obsHost, _, err := net.SplitHostPort(conn.RemoteAddr)
+	if err != nil || obsHost == "" {
+		return
+	}
+
+	if isPrivateIP(obsHost) {
+		if cfg.PublicHost == "" {
+			return
+		}
+		public.Set("address", cfg.PublicHost)
+		if cfg.P2PAnchorPort > 0 {
+			public.SetInt("port", cfg.P2PAnchorPort)
+		}
+		if !isPrivateIP(local.Get("address")) {
+			local.Set("address", obsHost)
+		}
+		return
+	}
+
+	// Remote client: the public station must point at the endpoint we observed. A
+	// client that reported no public station already gets this in handleRegister's
+	// derivedPublic path; this also fixes clients that reported a VPN-looking
+	// address as their public one.
+	if pa := public.Get("address"); pa != obsHost {
+		public.Set("address", obsHost)
+	}
+}
+
+// fixStationAddressForEndpoint is fixStationEndpoint for the single station a host
+// re-reports at ReplaceURL (its post-NAT LAN url, carrying the RVCID peers need). The
+// same VPN-looking address comes back here; repoint it at the hairpin source so the
+// dedupe-by-address in handleReplaceURL keeps one local station the natbridge can pair.
+func fixStationAddressForEndpoint(conn *Connection, st *StationURL, cfg SecureConnectionConfig) {
+	obsHost, _, err := net.SplitHostPort(conn.RemoteAddr)
+	if err != nil || obsHost == "" || !isPrivateIP(obsHost) || cfg.PublicHost == "" {
+		return
+	}
+	if !isPrivateIP(st.Get("address")) {
+		st.Set("address", obsHost)
+	}
 }

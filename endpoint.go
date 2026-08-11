@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -66,8 +67,9 @@ type Endpoint struct {
 	// each player's NAT type and latency (lost when the games moved off the previous stack).
 	OnNATProperties func(pid uint64, natMap, natFilter, rtt uint32)
 
-	handlers map[uint16]RMCHandler
-	mu       sync.RWMutex
+	handlers       map[uint16]RMCHandler
+	fallbackHandler RMCHandler
+	mu             sync.RWMutex
 
 	// customPacketHandlers handle non-standard PRUDP packet types (e.g. SSBU's Pia
 	// 5.19 type-8 keepalive, which the base SYN/CONNECT/DATA/PING/DISCONNECT switch
@@ -137,6 +139,18 @@ func (e *Endpoint) FindConnectionByID(id uint32) *Connection {
 // (that path uses FindConnectionByID on the exact RVCID = the live connection), giving a
 // "hole-punch ok" that masks the real failure. Net effect for ACNH: 2618-0502 "other consoles
 // not responding". Always hand back the highest-ID (newest) connection for the PID.
+
+// ConnectionIDs returns the ids of all live connections. The station relay uses it to
+// validate the source/destination connection ids it sniffs from PRUDP headers.
+func (e *Endpoint) ConnectionIDs() []uint32 {
+	e.connMu.Lock()
+	defer e.connMu.Unlock()
+	ids := make([]uint32, 0, len(e.connections))
+	for id := range e.connections {
+		ids = append(ids, id)
+	}
+	return ids
+}
 func (e *Endpoint) FindConnectionByPID(pid uint64) *Connection {
 	e.connMu.Lock()
 	defer e.connMu.Unlock()
@@ -170,9 +184,19 @@ func (e *Endpoint) Register(protocolID uint16, h RMCHandler) {
 	e.mu.Unlock()
 }
 
+// RegisterFallback sets a handler called when no protocol-specific handler is registered.
+func (e *Endpoint) RegisterFallback(h RMCHandler) {
+	e.mu.Lock()
+	e.fallbackHandler = h
+	e.mu.Unlock()
+}
+
 func (e *Endpoint) handler(protocolID uint16) (RMCHandler, bool) {
 	e.mu.RLock()
 	h, ok := e.handlers[protocolID]
+	if !ok && e.fallbackHandler != nil {
+		h, ok = e.fallbackHandler, true
+	}
 	e.mu.RUnlock()
 	return h, ok
 }
@@ -410,7 +434,7 @@ func (c *Connection) processCONNECT(p *Packet) {
 		fmt.Printf("[PRUDP] CONNECT login failed from %s: %v (payload=%d bytes)\n", c.RemoteAddr, err, len(p.Payload))
 		return // bad ticket — ignore
 	}
-	fmt.Printf("[PRUDP] CONNECT ok from %s pid=%d secure=%v\n", c.RemoteAddr, c.PID, c.Endpoint.Secure)
+	fmt.Printf("[%s] [PRUDP] CONNECT ok from %s pid=%d secure=%v\n", ts(), c.RemoteAddr, c.PID, c.Endpoint.Secure)
 
 	ack := &Packet{
 		Type:       PacketCONNECT,
@@ -547,11 +571,50 @@ func (c *Connection) processPing(p *Packet) {
 	}
 }
 
+// handlerWatchdogTimeout is how long an RMC request may take before every
+// goroutine stack is dumped to the log. A handler that never finishes (stuck
+// mutex, blocked socket write, deadlock) otherwise just leaves the console
+// polling an unanswered call forever — which is exactly what a matchmaking
+// "communication error" hang looks like from the outside.
+const handlerWatchdogTimeout = 10 * time.Second
+
+// dumpStacks renders every goroutine stack (for the watchdog / panic handler).
+func dumpStacks() string {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	if n == len(buf) {
+		buf = append(buf, []byte("\n[stack dump truncated]\n")...)
+		return string(buf)
+	}
+	return string(buf[:n])
+}
+
 func (c *Connection) dispatchRMC(payload []byte) {
 	req, err := ParseRMC(c.Settings, payload)
 	if err != nil || req.Mode != RMCRequest {
 		return
 	}
+
+	// Watchdog: if this request is not answered in time, the handler is stuck —
+	// dump every goroutine stack so the blocked location is visible in the log.
+	timer := time.AfterFunc(handlerWatchdogTimeout, func() {
+		fmt.Printf("[NEX] WATCHDOG: proto=%#x method=%d call=%d pid=%d not answered after %s\n%s\n",
+			req.Protocol, req.Method, req.CallID, c.PID, handlerWatchdogTimeout, dumpStacks())
+	})
+	defer timer.Stop()
+
+	// Panic recovery: without this a panicking handler crashes the whole process
+	// (gws's Recovery would swallow it and leave the client waiting forever on a
+	// response that will never come). Answer with an error so the game can fail
+	// loudly, and dump the stack so the bug is recorded.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[NEX] PANIC proto=%#x method=%d call=%d pid=%d: %v\n%s\n",
+				req.Protocol, req.Method, req.CallID, c.PID, r, dumpStacks())
+			c.SendRMC(NewRMCError(c.Settings, req.Protocol, req.CallID, ResultCoreUnknown))
+		}
+	}()
+
 	if c.Endpoint.OnRMC != nil {
 		c.Endpoint.OnRMC(c, req)
 	}
@@ -642,6 +705,10 @@ func (c *Connection) sendData(data []byte) {
 
 // sendOneFragment sends a single reliable DATA fragment, allocating the next
 // reliable sequence id under the lock (so concurrent/async sends stay ordered).
+// The socket write itself happens OUTSIDE the lock: WriteMessage can block on
+// TCP backpressure when a client stops reading, and holding c.mu across it
+// would wedge every other send on the connection (including the retransmit
+// loop), turning one stuck client into a hung matchmaking handler.
 func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 	c.mu.Lock()
 	pid := c.outReliable
@@ -661,8 +728,9 @@ func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 	}
 	c.outReliable++
 	encoded := EncodePacket(pkt)
-	c.send(encoded)
 	c.mu.Unlock()
+
+	c.send(encoded)
 
 	// Remember it for retransmission until the console acks it.
 	c.pendingMu.Lock()
@@ -708,8 +776,12 @@ func (c *Connection) retransmitLoop() {
 		c.pendingMu.Unlock()
 		for _, enc := range batch {
 			c.mu.Lock()
-			c.send(enc)
+			live := c.state != stateClosed
 			c.mu.Unlock()
+			if !live {
+				return
+			}
+			c.send(enc)
 		}
 	}
 }

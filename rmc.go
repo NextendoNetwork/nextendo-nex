@@ -126,8 +126,8 @@ func ParseRMC(s *Settings, data []byte) (*RMCMessage, error) {
 // and AcquireNexUniqueIDWithPassword both stayed hidden for weeks, each breaking a subset of
 // players. A refusal is the single most interesting thing this server does; it gets a line.
 func notImplemented(conn *Connection, proto uint16, req *RMCMessage) *RMCMessage {
-	fmt.Printf("[NEX] UNHANDLED proto=0x%x method=%d (0x%x) pid=%d callID=%d bodyLen=%d\n",
-		proto, req.Method, req.Method, conn.PID, req.CallID, len(req.Body))
+	fmt.Printf("[NEX] UNHANDLED proto=0x%x method=%d (0x%x) pid=%d callID=%d body=%x\n",
+		proto, req.Method, req.Method, conn.PID, req.CallID, req.Body)
 
 	return NewRMCError(conn.Settings, proto, req.CallID, ResultCoreNotImplemented)
 }
