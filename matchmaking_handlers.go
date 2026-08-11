@@ -93,6 +93,30 @@ type gathering struct {
 // Matchmaking is the in-memory matchmaking store + handlers, replicating the
 // proven server's session lifecycle (create/join, participant tracking) and the
 // server→client Participate notification the console's Pia waits on.
+// rmcTrace is a rolling ring of RMC calls for one connection.
+type rmcTrace [10]struct {
+	T      time.Time
+	Proto  uint16
+	Method uint32
+	CallID uint32
+	Body   string // first 64 hex chars of body
+}
+
+func (t *rmcTrace) push(proto uint16, method uint32, callID uint32, body []byte) {
+	copy(t[:], t[1:])
+	n := len(body)
+	if n > 32 {
+		n = 32
+	}
+	t[len(t)-1] = struct {
+		T      time.Time
+		Proto  uint16
+		Method uint32
+		CallID uint32
+		Body   string
+	}{time.Now(), proto, method, callID, fmt.Sprintf("%x", body[:n])}
+}
+
 type Matchmaking struct {
 	// FindByParticipantEnabled fait répondre RÉELLEMENT à FindMatchmakeSessionByParticipant
 	// (0x6D.0x33) au lieu d'une liste vide. Animal Crossing s'en sert pour la visite d'île
@@ -121,6 +145,15 @@ type Matchmaking struct {
 	// entre amis (méthodes 9/10/13). nil = aucun ami, donc listes vides : le comportement
 	// des jeux qui n'utilisent pas ce mécanisme.
 	FriendPIDs func(pid uint64) []uint64
+	// FriendName fournit le nom affichable d'un ami, pour les éléments de la réponse de
+	// la méthode 15 (le client les montre dans le menu « avec amis »). nil = chaîne vide.
+	FriendName func(pid uint64) string
+	// OnFriendSessionCreated, quand il est défini, est appelé juste après que l'hôte a
+	// créé une session (0x26) avec (pid de l'hôte, gid). Les jeux dont le client
+	// n'appelle jamais UpdateNotificationData (0x6D/9) lui-même (LM3) s'en servent pour
+	// publier la donnée « salle ouverte » de l'hôte pour ses amis (m10/m13). nil par
+	// défaut : les jeux qui publient eux-mêmes (ACNH) restent inchangés.
+	OnFriendSessionCreated func(pid uint64, gid uint32)
 
 	notif      *notifStore
 	mu         sync.Mutex
@@ -128,11 +161,42 @@ type Matchmaking struct {
 	byCode     map[string]uint32
 	nextGID    uint32
 	codeRand   uint32
+	trace      map[uint64]*rmcTrace // per-PID RMC call history
+}
+
+// TraceCall records an RMC call in the per-PID ring.
+func (m *Matchmaking) TraceCall(pid uint64, proto uint16, method uint32, callID uint32, body []byte) {
+	m.mu.Lock()
+	t := m.trace[pid]
+	if t == nil {
+		t = &rmcTrace{}
+		m.trace[pid] = t
+	}
+	m.mu.Unlock()
+	t.push(proto, method, callID, body)
+}
+
+// dumpTrace prints the last N RMC calls for a PID.
+func (m *Matchmaking) dumpTrace(pid uint64) string {
+	m.mu.Lock()
+	t := m.trace[pid]
+	m.mu.Unlock()
+	if t == nil {
+		return "(no trace)"
+	}
+	var out string
+	for _, e := range t {
+		if e.T.IsZero() {
+			continue
+		}
+		out += fmt.Sprintf("\n  %s proto=%#x method=%d call=%d body=%s", e.T.Format("15:04:05.000"), e.Proto, e.Method, e.CallID, e.Body)
+	}
+	return out
 }
 
 // NewMatchmaking returns an empty store.
 func NewMatchmaking() *Matchmaking {
-	return &Matchmaking{gatherings: map[uint32]*gathering{}, byCode: map[string]uint32{}, nextGID: 1, codeRand: 0x1234, notif: newNotifStore()}
+	return &Matchmaking{gatherings: map[uint32]*gathering{}, byCode: map[string]uint32{}, nextGID: 1, codeRand: 0x1234, notif: newNotifStore(), trace: map[uint64]*rmcTrace{}}
 }
 
 // ExtensionHandler handles MatchmakeExtension (0x6D).
@@ -170,6 +234,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.getFriendNotificationData(conn, req, false)
 		case MethodGetFriendNotificationDataList:
 			return m.getFriendNotificationData(conn, req, true)
+		case MethodGetFriendNotificationDataByPID:
+			return m.getFriendNotificationDataByPID(conn, req)
 		case MethodUpdateMatchmakeSessionPart:
 			return m.updateSessionPart(conn, req)
 		case MethodUpdateApplicationBuffer:
@@ -204,6 +270,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 // MatchMakingHandler handles MatchMaking (0x15).
 func (m *Matchmaking) MatchMakingHandler() RMCHandler {
 	return func(conn *Connection, req *RMCMessage) *RMCMessage {
+		m.TraceCall(conn.PID, req.Protocol, req.Method, req.CallID, req.Body)
+		fmt.Printf("[0x15] pid=%d method=%d call=%d body=%x\n", conn.PID, req.Method, req.CallID, req.Body)
 		switch req.Method {
 		case MethodGetSessionURLs:
 			return m.getSessionURLs(conn, req)
@@ -337,14 +405,34 @@ func finalizeCreatedSession(session *MatchmakeSession, gid uint32, ownerPID uint
 	session.SessionKey = randomBytes(32)
 	session.StartedTime = NowDateTime()
 	session.SystemPasswordEnabled = false
+	session.UserPasswordEnabled = false
+	session.State = 1 // Open/Active
+	session.OpenParticipation = true // Host can be found by joiners
 	for len(session.Attribs) < 6 {
 		session.Attribs = append(session.Attribs, 0)
 	}
 	if session.Param.Params == nil {
 		session.Param.Params = map[string]Variant{}
 	}
-	session.Param.Params["@SR"] = Variant{Type: VariantBool, Bool: true}
-	session.Param.Params["@GIR"] = Variant{Type: VariantInt64, Int: 3}
+	// Strip empty-key entries that arise from NUL-terminated key serialization.
+	for k := range session.Param.Params {
+		if k == "" || k == "\x00" {
+			delete(session.Param.Params, k)
+		}
+	}
+	lm3SessionParams := map[string]Variant{
+		"@UsGI": {Type: VariantBool, Bool: true},
+		"@UpGI": {Type: VariantBool, Bool: true},
+		"@CC":   {Type: VariantUint64, Uint: 0},
+		"@RV":   {Type: VariantUint64, Uint: 1},
+		"@DR":   {Type: VariantUint64, Uint: 0},
+		"@VR":   {Type: VariantUint64, Uint: 34}, // match appVersion 0x22 from ApplicationData
+		"@TS":   {Type: VariantUint64, Uint: 8},
+		"@SR":   {Type: VariantBool, Bool: true},
+	}
+	for k, v := range lm3SessionParams {
+		session.Param.Params[k] = v
+	}
 }
 
 // createGathering registers a new gathering owned by the caller (mutex held).
@@ -384,7 +472,7 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 		}
 		SendNotification(target, &NotificationEvent{
 			PIDSource: caller.PID, Type: NotificationParticipate,
-			Param1: uint64(gid), Param2: caller.PID, StrParam: joinMessage, Param3: uint64(count),
+			Param1: uint64(gid), Param2: caller.PID, StrParam: participationStationData(caller.PID, participants, ep), Param3: uint64(count),
 		})
 	}
 	// 2. Recap to the caller: each pre-existing participant.
@@ -393,12 +481,33 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 			continue
 		}
 		SendNotification(caller, &NotificationEvent{
-			PIDSource: caller.PID, Type: NotificationParticipate,
-			Param1: uint64(gid), Param2: pid, StrParam: joinMessage, Param3: uint64(count),
+			PIDSource: pid, Type: NotificationParticipate,
+			Param1: uint64(gid), Param2: pid, StrParam: participationStationData(pid, participants, ep), Param3: uint64(count),
 		})
 	}
-	fmt.Printf("[MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
-		gid, caller.PID, count, count-1, participants)
+	fmt.Printf("[%s] [MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
+		ts(), gid, caller.PID, count, count-1, participants)
+}
+
+// participationStationData is the compact station-id list consumed by S2's Pia mesh
+// notification handler. Param2 carries the participant PID; these entries carry the
+// corresponding server connection IDs (RVCIDs) used by NAT traversal.
+func participationStationData(first uint64, participants []uint64, endpoint *Endpoint) string {
+	ids := [4]uint64{first}
+	if connection := endpoint.FindConnectionByPID(first); connection != nil {
+		ids[0] = uint64(connection.ID)
+	}
+	count := 1
+	for _, pid := range participants {
+		if pid == first || count == len(ids) {
+			continue
+		}
+		if connection := endpoint.FindConnectionByPID(pid); connection != nil {
+			ids[count] = uint64(connection.ID)
+		}
+		count++
+	}
+	return fmt.Sprintf("0x%016x:%016x:%016x:%016x", ids[0], ids[1], ids[2], ids[3])
 }
 
 // [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to
@@ -488,6 +597,7 @@ func gatheringNATCompatible(ep *Endpoint, joiner natClass, members []uint64, joi
 
 func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
+	fmt.Printf("[%s] [MM] autoMatchmake request body=%x\n", ts(), req.Body)
 	var param AutoMatchmakeParam
 	in := NewStreamIn(req.Body, s)
 	in.Extract(&param)
@@ -525,7 +635,6 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 			}
 		}
 	}
-	joined := false
 	if g == nil {
 		g = m.createGathering(conn, src)
 		if soloForced {
@@ -539,22 +648,39 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 		}
 	} else if !containsPID(g.participants, conn.PID) {
 		g.participants = append(g.participants, conn.PID)
-		joined = true
 	}
 	g.session.NumParticipants = uint32(len(g.participants))
 	result := *g.session
+	// Deep-copy the param map so we don't mutate the persistent session.
+	if result.Param.Params != nil {
+		cp := make(map[string]Variant, len(result.Param.Params))
+		for k, v := range result.Param.Params {
+			cp[k] = v
+		}
+		result.Param.Params = cp
+	}
+	// finalizeCreatedSession already stamped all session params.
 	gid, count := g.session.ID, len(g.participants)
-	parts := append([]uint64(nil), g.participants...)
+	parts := make([]uint64, len(g.participants))
+	copy(parts, g.participants)
 	out := NewStreamOut(s)
 	out.Add(&result)
 	m.mu.Unlock()
 
-	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v respLen=%d\n  resp=%x\n",
-		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(out.Bytes()), out.Bytes())
-	// Always notify the owner of the participation — including the lone-host self-join
-	// (joined==false), which is the case Pia needs to leave the WaitNotification wall.
-	_ = joined
+	// Self-notify the host (same as createSession) so the host leaves Pia's
+	// WaitNotification wall instead of hanging on "could not join game".
 	m.notifyParticipation(conn, parts, gid, "")
+
+	keys := make([]string, 0, len(result.Param.Params))
+	for k := range result.Param.Params {
+		keys = append(keys, k)
+	}
+	paramDump := ""
+	for k, v := range result.Param.Params {
+		paramDump += fmt.Sprintf(" %s=%+v", k, v)
+	}
+	fmt.Printf("[%s] [MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d count=%d mode=%d flags=%d state=%d open=%t minP=%d maxP=%d skLen=%d attribs=%v appDataLen=%d appData=%x paramKeys=%v params=[%s] respLen=%d\n  resp=%x\n",
+		ts(), conn.PID, gid, result.OwnerPID, result.HostPID, count, result.GameMode, result.Flags, result.State, result.OpenParticipation, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(result.ApplicationData), result.ApplicationData, keys, paramDump, len(out.Bytes()), out.Bytes())
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 
@@ -577,6 +703,9 @@ func (m *Matchmaking) createSession(conn *Connection, req *RMCMessage) *RMCMessa
 	m.mu.Unlock()
 
 	fmt.Printf("[MM] createSession pid=%d -> gid=%d owner=%d\n", conn.PID, result.ID, result.OwnerPID)
+	if m.OnFriendSessionCreated != nil {
+		m.OnFriendSessionCreated(conn.PID, gid)
+	}
 	// Self-notify the host (same as autoMatchmake) so a friend-room/tournament lobby
 	// held solo also leaves Pia's WaitNotification wall instead of 2618-562.
 	m.notifyParticipation(conn, parts, gid, "")
@@ -860,7 +989,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 		time.Sleep(hostReplaceURLPoll)
 
 		if urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst); status == bridgeOK {
-			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
+			fmt.Printf("[%s] [MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", ts(), conn.PID)
 			conn.SendRMC(sessionURLsResponse(conn, req, urls))
 
 			return
@@ -869,7 +998,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 
 	// Out of time: answer with whatever the host reported. Not answering at all would
 	// leave the joiner hanging until ITS timeout, which is strictly worse.
-	fmt.Printf("[MM] GetSessionURLs pid=%d: host never reported its ReplaceURL -> raw stations\n", conn.PID)
+	fmt.Printf("[%s] [MM] GetSessionURLs pid=%d: host never reported its ReplaceURL -> raw stations\n", ts(), conn.PID)
 	conn.SendRMC(sessionURLsResponse(conn, req, host.Stations()))
 }
 
@@ -887,20 +1016,26 @@ func (m *Matchmaking) unregister(conn *Connection, req *RMCMessage) {
 	g, existed := m.gatherings[gid]
 	var owner uint64
 	mine := false
+	snapshot := "(none)"
 	if existed {
 		owner = g.session.OwnerPID
 		mine = owner == conn.PID
+		snapshot = fmt.Sprintf("state=%d mode=%d flags=%d open=%t minP=%d maxP=%d parts=%d partsList=%v started=%s",
+			g.session.State, g.session.GameMode, g.session.Flags, g.session.OpenParticipation,
+			g.session.MinParticipants, g.session.MaxParticipants, len(g.participants), g.participants,
+			time.Unix(int64(g.session.StartedTime), 0).Format(time.TimeOnly))
 	}
-	// [MC churn diag] Only the OWNER may unregister their gathering. A caller unregistering
-	// a gathering it does not own would silently delete another player's live lobby (making
-	// it un-browsable) — never legitimate. Log every call to see whether MC is tearing down
-	// its OWN just-created host session (the suspected churn cause).
 	if existed && mine {
 		delete(m.gatherings, gid)
+		// L'hôte a refermé sa salle : sa « porte ouverte » ne doit pas survivre à la
+		// session, sinon elle resterait proposée à ses amis (salle fantôme au m13).
+		m.notif.forget(owner)
 	}
 	m.mu.Unlock()
-	fmt.Printf("[MM] unregister caller=%d gid=%d existed=%v owner=%d mine=%v -> %s\n",
-		conn.PID, gid, existed, owner, mine, map[bool]string{true: "REMOVED", false: "kept (not owner / gone)"}[existed && mine])
+	trace := m.dumpTrace(conn.PID)
+	fmt.Printf("[%s] [MM] unregister caller=%d gid=%d existed=%v owner=%d mine=%v session=[%s] -> %s\n  last-RMC:%s\n",
+		ts(), conn.PID, gid, existed, owner, mine, snapshot,
+		map[bool]string{true: "REMOVED", false: "kept (not owner / gone)"}[existed && mine], trace)
 }
 
 // setParticipation implements MatchmakeExtension CloseParticipation(0x01) /
@@ -1146,9 +1281,14 @@ func (m *Matchmaking) endParticipation(conn *Connection, req *RMCMessage) {
 	gid := NewStreamIn(req.Body, conn.Settings).U32()
 	m.mu.Lock()
 	if g := m.gatherings[gid]; g != nil {
+		owner := g.session.OwnerPID
 		g.participants = removePID(g.participants, conn.PID)
 		if len(g.participants) == 0 {
 			delete(m.gatherings, gid)
+			// L'hôte a quitté en dernier : sa salle fermée ne doit plus apparaître au m13.
+			if owner == conn.PID {
+				m.notif.forget(owner)
+			}
 		} else {
 			g.session.NumParticipants = uint32(len(g.participants))
 		}
@@ -1172,6 +1312,26 @@ func (m *Matchmaking) makeCode(gid uint32) string {
 		g.code = code
 	}
 	return code
+}
+
+// SessionByPID returns the participant PID list for the gathering the given PID
+// is in, or nil if the PID is not in any gathering. Must NOT hold m.mu.
+func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, g := range m.gatherings {
+		if g == nil || g.session == nil {
+			continue
+		}
+		for _, p := range g.participants {
+			if p == pid {
+				out := make([]uint64, len(g.participants))
+				copy(out, g.participants)
+				return out
+			}
+		}
+	}
+	return nil
 }
 
 func containsPID(list []uint64, pid uint64) bool {

@@ -2,6 +2,7 @@ package nex
 
 import (
 	"crypto/rand"
+	"fmt"
 	"sync/atomic"
 )
 
@@ -64,6 +65,8 @@ var notifCallCounter uint32
 // (a hardcoded source port is silently dropped).
 func SendNotification(target *Connection, event *NotificationEvent) {
 	s := target.Settings
+	fmt.Printf("[NEX Notify] target=%d source=%d type=%d param1=%d param2=%d str=%q param3=%d\n",
+		target.PID, event.PIDSource, event.Type, event.Param1, event.Param2, event.StrParam, event.Param3)
 	out := NewStreamOut(s)
 	out.Add(event)
 	callID := 0xFFFE0000 + atomic.AddUint32(&notifCallCounter, 1)
