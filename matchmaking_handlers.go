@@ -1314,6 +1314,25 @@ func (m *Matchmaking) makeCode(gid uint32) string {
 	return code
 }
 
+// GatheringIDByPID returns the id of the gathering the given PID is in.
+// Titles that publish "which room is my friend in" need the id itself, not just
+// the participant list. Must NOT be called while holding m.mu.
+func (m *Matchmaking) GatheringIDByPID(pid uint64) (uint32, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, g := range m.gatherings {
+		if g == nil || g.session == nil {
+			continue
+		}
+		for _, p := range g.participants {
+			if p == pid {
+				return g.session.ID, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // SessionByPID returns the participant PID list for the gathering the given PID
 // is in, or nil if the PID is not in any gathering. Must NOT hold m.mu.
 func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
