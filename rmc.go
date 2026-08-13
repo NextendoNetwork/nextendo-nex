@@ -122,12 +122,12 @@ func ParseRMC(s *Settings, data []byte) (*RMCMessage, error) {
 //
 // Every one of these used to be a silent NewRMCError: the server answered "no", the game
 // gave up, and nothing on our side recorded which method it was. That turns a five-minute
-// diagnosis into log archaeology across a client measured — it is how UpdateMatchmakeSessionPart
+// diagnosis into log archaeology across a client capture — it is how UpdateMatchmakeSessionPart
 // and AcquireNexUniqueIDWithPassword both stayed hidden for weeks, each breaking a subset of
 // players. A refusal is the single most interesting thing this server does; it gets a line.
 func notImplemented(conn *Connection, proto uint16, req *RMCMessage) *RMCMessage {
-	fmt.Printf("[NEX] UNHANDLED proto=0x%x method=%d (0x%x) pid=%d callID=%d body=%x\n",
-		proto, req.Method, req.Method, conn.PID, req.CallID, req.Body)
+	fmt.Printf("[NEX] UNHANDLED proto=0x%x method=%d (0x%x) pid=%d callID=%d bodyLen=%d\n",
+		proto, req.Method, req.Method, conn.PID, req.CallID, len(req.Body))
 
 	return NewRMCError(conn.Settings, proto, req.CallID, ResultCoreNotImplemented)
 }

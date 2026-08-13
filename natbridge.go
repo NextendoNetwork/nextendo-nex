@@ -2,7 +2,6 @@ package nex
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -22,8 +21,8 @@ import (
 // Without it the joiner gets the TCP port, the probe never lands, and the console gives
 // up: it stops after MatchMakingExt m=1 and re-registers in a loop until the game shows a
 // connection error. That is the exact shape of the MK8 worldwide failure, and it is why
-// worldwide broke when MK8 moved to this core — the previous stack had this bridge
-// (the previous stack), and it was not ported.
+// worldwide broke when MK8 moved to this core — the nex-go stack had this bridge
+// (nex-protocols-common-go/match-making/get_session_urls.go), and it was not ported.
 //
 // The file is written by the nncs responder co-located with the game server
 // (NNCS_NAT_FILE). It MUST be local: a responder on another host cannot share it.
@@ -65,20 +64,21 @@ var (
 
 const natCacheTTL = 2 * time.Second
 
-// Relay state: when the game server enables it (SetStationRelay), the natbridge hands
-// out station URLs at the server's relay socket instead of the host's observed endpoint.
-// The relay port forwards the traffic between the two peers, which is the only way two
-// NAT'd players with no port forwarding can talk at all.
+// Station relay configuration (opt-in, OFF by default).
+//
+// A game server that cannot rely on direct P2P (both peers behind firewalled NATs with no
+// port forwarding) can stand in for the peers' station endpoint and forward between them.
+// Nothing here changes behaviour until a server calls SetStationRelay: relayHost stays
+// empty, StationRelay reports disabled, and every existing title keeps the plain natbridge
+// path untouched. Introduced for the Luigi's Mansion 3 server.
 var (
 	relayMu   sync.RWMutex
 	relayHost string
 	relayPort int
 )
 
-// SetStationRelay switches the natbridge into relay mode: GetSessionURLs answers with
-// stations at the server's relay socket (host:port) so ALL of a joiner's station
-// traffic — resolve probes, punch attempts, data — lands on the relay port, and the
-// game server forwards it to the real peer there. Pass host "" to disable.
+// SetStationRelay switches the station relay on (host + port of the relay socket) or off
+// (empty host). Off by default.
 func SetStationRelay(host string, port int) {
 	relayMu.Lock()
 	defer relayMu.Unlock()
@@ -86,79 +86,18 @@ func SetStationRelay(host string, port int) {
 	relayPort = port
 }
 
-// StationRelay reports the relay mode configuration (host, port, enabled).
+// StationRelay reports the relay configuration (host, port, enabled).
 func StationRelay() (string, int, bool) {
 	relayMu.RLock()
 	defer relayMu.RUnlock()
 	return relayHost, relayPort, relayHost != "" && relayPort > 0
 }
 
-// stationRelay is the internal form of StationRelay.
-func stationRelay() (string, int, bool) {
-	return StationRelay()
-}
-
-// NatPortForIP returns the external UDP port the nncs responder observed for a
-// public IP — the endpoint peers must actually send station traffic to. Exported
-// for game servers that shape 0x79 station records (LM3) off the station list.
+// NatPortForIP exposes the external UDP port the nncs responder observed for a public IP —
+// the endpoint peers must actually send station traffic to. Exported for game servers that
+// shape their own station records off the observed endpoint.
 func NatPortForIP(ip string) (int, bool) {
 	return natPortForIP(ip)
-}
-
-// bestStationURL returns the station URL a peer should be told to probe for the
-// given connection: the relay socket in relay mode; otherwise the station on the
-// NNCS-confirmed UDP port (the endpoint the NAT check actually observed —
-// ReplaceURL's post-NAT station carries it); otherwise the public-flagged
-// station, else the first station. It is the URL the NAT traversal handler
-// pushes in an InitiateProbe when the requesting console (m=1) did not supply
-// its own station URL.
-func bestStationURL(conn *Connection) string {
-	if conn == nil {
-		return ""
-	}
-	if rHost, rPort, rOn := stationRelay(); rOn {
-		for _, u := range conn.Stations() {
-			if u != nil && u.Get("address") == rHost && u.GetInt("port") == rPort {
-				return u.String()
-			}
-		}
-	}
-	natPort := 0
-	if host, _, err := net.SplitHostPort(conn.RemoteAddr); err == nil {
-		if p, ok := natPortForIP(host); ok {
-			natPort = p
-		}
-	}
-	var fallback string
-	var natfURL string
-	var pubURL string
-	for _, u := range conn.Stations() {
-		if u == nil || u.Get("address") == "" {
-			continue
-		}
-		if natPort > 0 && u.GetInt("port") == natPort {
-			return u.String()
-		}
-		if fallback == "" {
-			fallback = u.String()
-		}
-		// A station carrying natf was re-reported AFTER the NAT handshake
-		// (ReplaceURL) — it is the one with the confirmed endpoint. Prefer it
-		// over a public-flagged station, which may still carry the WSS TCP port.
-		if u.GetInt("natf") != 0 && natfURL == "" {
-			natfURL = u.String()
-		}
-		if u.GetInt("type")&2 != 0 && pubURL == "" {
-			pubURL = u.String()
-		}
-	}
-	if natfURL != "" {
-		return natfURL
-	}
-	if pubURL != "" {
-		return pubURL
-	}
-	return fallback
 }
 
 // natPortForIP returns the external UDP port the nncs responder observed for a public IP.
@@ -234,44 +173,6 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 		return urls, bridgeNoStations
 	}
 
-	// The RVCID comes from the host's ReplaceURL, sent AFTER its NAT handshake. This is the
-	// one shortfall worth waiting on: the host is expected to report it within about a
-	// second, and a joiner routinely asks before it does.
-	cid := local.GetInt("RVCID")
-	if cid == 0 {
-		return urls, bridgeNoRVCID
-	}
-
-	if relayHost, relayPort, relayOn := stationRelay(); relayOn {
-		// Relay mode: the host's stored public station already points at the server's
-		// relay socket (Register rewrote it), and the joiner could never reach the
-		// host's real endpoint anyway (no port forwarding on either side). Hand out
-		// relay URLs for BOTH candidates so every packet — resolve probe, punch,
-		// data — lands on the relay port, where the server forwards by destination
-		// connection id (seeded with the host's observed UDP endpoint). The LAN
-		// candidate keeps natf=34;natm=1 so the console treats it as directly
-		// reachable and connects without a punch dance.
-		lan := public.Copy()
-		lan.Set("address", relayHost)
-		lan.SetInt("port", relayPort)
-		lan.SetInt("RVCID", cid)
-		lan.Set("natf", "34")
-		lan.Set("natm", "1")
-		lan.Remove("type")
-		lan.Remove("Pa")
-
-		pub := public.Copy()
-		pub.Set("address", relayHost)
-		pub.SetInt("port", relayPort)
-		pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
-		pub.Set("Pa", privateAddr)
-
-		fmt.Printf("[%s] [natbridge] relay mode: %s stations -> relay %s:%d (lan=%s rvcid=%d)\n",
-			ts(), publicAddr, relayHost, relayPort, privateAddr, cid)
-
-		return []*StationURL{lan, pub}, bridgeOK
-	}
-
 	udpPort, ok := natPortForIP(publicAddr)
 	if !ok {
 		// The nncs responder never saw this host. Either it has not probed yet, or its
@@ -282,6 +183,14 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 		return urls, bridgeNoObservation
 	}
 
+	// The RVCID comes from the host's ReplaceURL, sent AFTER its NAT handshake. This is the
+	// one shortfall worth waiting on: the host is expected to report it within about a
+	// second, and a joiner routinely asks before it does.
+	cid := local.GetInt("RVCID")
+	if cid == 0 {
+		return urls, bridgeNoRVCID
+	}
+
 	// La station LAN se construit à partir de la station LOCALE de l'hôte (son ReplaceURL), PAS de
 	// la publique : elle porte déjà l'adresse privée, les vrais natf/natm de l'hôte, le RVCID et —
 	// surtout — le CID (l'identifiant de connexion de l'hôte dont la Pia du visiteur a besoin pour
@@ -289,7 +198,7 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// PERDAIT ce CID : le visiteur perçait le NAT mais la session Pia ne se montait jamais →
 	// « console ne répond pas » (2618-0502). On n'échange que le port UDP (celui observé par nncs) ;
 	// type/Pa sont retirés pour que la console reconnaisse le candidat LOCAL (une URL LAN portant
-	// type=public fait sauter le candidat par Pia). Prouvé par la measured the previous stack GetSessionURLs :
+	// type=public fait sauter le candidat par Pia). Prouvé par la capture nex-go GetSessionURLs :
 	// LAN = address=<privée>;port=<udp>;CID=<cid du ReplaceURL>;RVCID.
 	lan := local.Copy()
 	lan.SetInt("port", udpPort)
@@ -301,8 +210,8 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
 	// Pa mirrors the proven server. MK8/S2 send Pa=<private> (the default); ACNH's Pia
 	// instead reads the public candidate's Pa as the endpoint to reach, so it must be the
-	// PUBLIC address — the previous stack server ACNH is known to work against sends address==Pa==
-	// public (measured acnh nexgo_reference.bin). Pa=<private> there sends the joiner's probe
+	// PUBLIC address — the nex-go server ACNH is known to work against sends address==Pa==
+	// public (capture acnh nexgo_reference.bin). Pa=<private> there sends the joiner's probe
 	// to the host's LAN address and stalls it at "getting ready to depart" (2618-0502).
 	pa := privateAddr
 	if publicFirst {
@@ -314,13 +223,13 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// between a joinable host and a session that stalls at MatchMakingExt m=1, and it
 	// depends on a file written by another process — so it must be visible in the log
 	// rather than inferred from players reporting that it works.
-	fmt.Printf("[%s] [natbridge] %s: registered tcp port %d -> observed udp port %d (lan=%s rvcid=%d, publicFirst=%v)\n",
-		ts(), publicAddr, public.GetInt("port"), udpPort, privateAddr, cid, publicFirst)
+	fmt.Printf("[natbridge] %s: registered tcp port %d -> observed udp port %d (lan=%s rvcid=%d, publicFirst=%v)\n",
+		publicAddr, public.GetInt("port"), udpPort, privateAddr, cid, publicFirst)
 
 	// Station order. MK8/S2 take [lan, public] (the default). ACNH's Pia treats the FIRST
 	// station as the primary P2P candidate and never falls through to the second, so a
 	// remote joiner handed [lan, ...] probes the unreachable 192.168.x address and fails;
-	// the previous stack server ACNH works against sends [public, lan]. Reproduce that here.
+	// the nex-go server ACNH works against sends [public, lan]. Reproduce that here.
 	if publicFirst {
 		return []*StationURL{pub, lan}, bridgeOK
 	}
@@ -339,6 +248,6 @@ func natBridgeSkip(why string, urls []*StationURL) {
 		rendered = append(rendered, u.String())
 	}
 
-	fmt.Printf("[%s] [natbridge] SKIP (%s) — handing over raw stations: %s\n",
-		ts(), why, strings.Join(rendered, " | "))
+	fmt.Printf("[natbridge] SKIP (%s) — handing over raw stations: %s\n",
+		why, strings.Join(rendered, " | "))
 }

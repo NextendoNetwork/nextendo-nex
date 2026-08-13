@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -14,7 +13,7 @@ import (
 // fragmentPacing is the delay inserted between successive fragments of a large reliable
 // response. Blasting every fragment of a big payload (e.g. SSBU's 15.7 KB DataStore init
 // = 13 fragments) at once overflows the console's small PRUDP window, the overflow is
-// silently dropped and the message never reassembles. Measured from a measurement of the
+// silently dropped and the message never reassembles. Measured from a wire capture of the
 // proven server: it emits the 13 fragments in strict order over ~200 ms, one every ~16 ms,
 // WITHOUT pausing for acks — so a fixed delay reproduces it exactly. (Ack-driven windowing
 // was tried here instead and stretched the same payload to ~2.2 s.)
@@ -60,10 +59,12 @@ type Endpoint struct {
 	OnRMC func(*Connection, *RMCMessage)
 	// OnNATProperties, if set, is called when a client reports its NAT behaviour +
 	// ping via NATTraversal ReportNATProperties, so the monitoring dashboard can show
-	// each player's NAT type and latency (lost when the games moved off the previous stack).
+	// each player's NAT type and latency (lost when the games moved off the nex-go stack).
 	OnNATProperties func(pid uint64, natMap, natFilter, rtt uint32)
 
-	handlers        map[uint16]RMCHandler
+	handlers map[uint16]RMCHandler
+	// fallbackHandler, when set, answers protocols with no registered handler.
+	// nil by default: unregistered protocols keep returning NotImplemented.
 	fallbackHandler RMCHandler
 	mu              sync.RWMutex
 
@@ -135,18 +136,6 @@ func (e *Endpoint) FindConnectionByID(id uint32) *Connection {
 // (that path uses FindConnectionByID on the exact RVCID = the live connection), giving a
 // "hole-punch ok" that masks the real failure. Net effect for ACNH: 2618-0502 "other consoles
 // not responding". Always hand back the highest-ID (newest) connection for the PID.
-
-// ConnectionIDs returns the ids of all live connections. The station relay uses it to
-// validate the source/destination connection ids it sniffs from PRUDP headers.
-func (e *Endpoint) ConnectionIDs() []uint32 {
-	e.connMu.Lock()
-	defer e.connMu.Unlock()
-	ids := make([]uint32, 0, len(e.connections))
-	for id := range e.connections {
-		ids = append(ids, id)
-	}
-	return ids
-}
 func (e *Endpoint) FindConnectionByPID(pid uint64) *Connection {
 	e.connMu.Lock()
 	defer e.connMu.Unlock()
@@ -173,17 +162,29 @@ func (e *Endpoint) SetSecureAccount(password string, pid uint64) {
 	e.SecureKey = e.Settings.DeriveKey([]byte(password), pid)
 }
 
+// ConnectionIDs returns the ids of all live connections.
+func (e *Endpoint) ConnectionIDs() []uint32 {
+	e.connMu.Lock()
+	defer e.connMu.Unlock()
+	ids := make([]uint32, 0, len(e.connections))
+	for id := range e.connections {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// RegisterFallback sets a handler called when no protocol-specific handler is
+// registered. nil (the default) keeps the NotImplemented answer.
+func (e *Endpoint) RegisterFallback(h RMCHandler) {
+	e.mu.Lock()
+	e.fallbackHandler = h
+	e.mu.Unlock()
+}
+
 // Register installs the RMC handler for a protocol id.
 func (e *Endpoint) Register(protocolID uint16, h RMCHandler) {
 	e.mu.Lock()
 	e.handlers[protocolID] = h
-	e.mu.Unlock()
-}
-
-// RegisterFallback sets a handler called when no protocol-specific handler is registered.
-func (e *Endpoint) RegisterFallback(h RMCHandler) {
-	e.mu.Lock()
-	e.fallbackHandler = h
 	e.mu.Unlock()
 }
 
@@ -404,7 +405,7 @@ func (c *Connection) processSYN(p *Packet) {
 		// the client completes the handshake but then sends its CONNECT with an EMPTY
 		// payload — it never hands over its Kerberos ticket, so the session is never
 		// really authenticated (which is what forced the PID-by-IP workaround). Wire
-		// measured of the secure connection with the client held constant: proven server
+		// capture of the secure connection with the client held constant: proven server
 		// SYN-ACK ACK|HASSIZE -> CONNECT plen=104; ours SYN-ACK ACK -> CONNECT plen=0,
 		// the only remaining difference across the whole handshake.
 		Flags:      FlagACK | FlagHasSize,
@@ -430,7 +431,7 @@ func (c *Connection) processCONNECT(p *Packet) {
 		fmt.Printf("[PRUDP] CONNECT login failed from %s: %v (payload=%d bytes)\n", c.RemoteAddr, err, len(p.Payload))
 		return // bad ticket — ignore
 	}
-	fmt.Printf("[%s] [PRUDP] CONNECT ok from %s pid=%d secure=%v\n", ts(), c.RemoteAddr, c.PID, c.Endpoint.Secure)
+	fmt.Printf("[PRUDP] CONNECT ok from %s pid=%d secure=%v\n", c.RemoteAddr, c.PID, c.Endpoint.Secure)
 
 	ack := &Packet{
 		Type:       PacketCONNECT,
@@ -464,23 +465,25 @@ func (c *Connection) processLoginRequest(payload []byte) ([]byte, error) {
 
 	// Ticketless CONNECT. Some consoles reach the secure server WITHOUT a Kerberos ticket
 	// (empty CONNECT) because their source-key exchange isn't matched to our token
-	// derivation yet, so we still accept it — but ONLY as the identity that authenticated
-	// from this very address, and only within authRecallTTL.
+	// derivation yet, so we still accept it — but ONLY as the identity that just
+	// authenticated from this very IP, and only within authRecallTTL.
 	//
-	// SECURITY: the CONNECT signature proves knowledge of the access key, which every game
-	// client embeds — it is NOT proof of identity. So an empty CONNECT must never be able to
-	// name an identity of its own. Two earlier fallbacks did exactly that and are removed:
-	// an address-agnostic "most recently minted login PID" recall, and a placeholder PID
-	// allocated inside the account range. Either let a client that never authenticated take
-	// over another player's account. A ticketless CONNECT with no matching recall is now
-	// refused; the client must present a real ticket.
+	// SECURITY: the CONNECT signature proves knowledge of the PUBLIC access key (baked into
+	// every game client), NOT identity. So an empty CONNECT must never be able to name an
+	// identity of its own. The two former fallbacks did exactly that and are removed:
+	//   - RecallRecentAuthPID(): the most recent login PID minted by ANYONE within 8s —
+	//     any attacker reaching this port could inherit a stranger's freshly-authenticated
+	//     account (and, via the one-place-online gate, evict the real owner).
+	//   - a placeholder PID in 1800000000+, which aliases real sequential account PIDs.
+	// A ticketless CONNECT with no same-IP recall is now REFUSED; the client must present a
+	// real ticket (the path every current player already uses).
 	if len(payload) == 0 {
 		pid, ok := RecallAuthPID(c.RemoteAddr)
 		if !ok {
 			return nil, fmt.Errorf("connect: ticketless CONNECT with no recent auth from this address")
 		}
-		// Same client authed a moment ago on the auth server: reuse that PID so
-		// the session it hosts is owned by the console's real identity.
+		// Same client authed a moment ago on the auth server: reuse that PID so the
+		// session it hosts is owned by the console's real identity.
 		c.PID = pid
 		fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> inherited auth pid=%d\n", c.RemoteAddr, c.PID)
 		return []byte{}, nil
@@ -566,50 +569,11 @@ func (c *Connection) processPing(p *Packet) {
 	}
 }
 
-// handlerWatchdogTimeout is how long an RMC request may take before every
-// goroutine stack is dumped to the log. A handler that never finishes (stuck
-// mutex, blocked socket write, deadlock) otherwise just leaves the console
-// polling an unanswered call forever — which is exactly what a matchmaking
-// "communication error" hang looks like from the outside.
-const handlerWatchdogTimeout = 10 * time.Second
-
-// dumpStacks renders every goroutine stack (for the watchdog / panic handler).
-func dumpStacks() string {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	if n == len(buf) {
-		buf = append(buf, []byte("\n[stack dump truncated]\n")...)
-		return string(buf)
-	}
-	return string(buf[:n])
-}
-
 func (c *Connection) dispatchRMC(payload []byte) {
 	req, err := ParseRMC(c.Settings, payload)
 	if err != nil || req.Mode != RMCRequest {
 		return
 	}
-
-	// Watchdog: if this request is not answered in time, the handler is stuck —
-	// dump every goroutine stack so the blocked location is visible in the log.
-	timer := time.AfterFunc(handlerWatchdogTimeout, func() {
-		fmt.Printf("[NEX] WATCHDOG: proto=%#x method=%d call=%d pid=%d not answered after %s\n%s\n",
-			req.Protocol, req.Method, req.CallID, c.PID, handlerWatchdogTimeout, dumpStacks())
-	})
-	defer timer.Stop()
-
-	// Panic recovery: without this a panicking handler crashes the whole process
-	// (gws's Recovery would swallow it and leave the client waiting forever on a
-	// response that will never come). Answer with an error so the game can fail
-	// loudly, and dump the stack so the bug is recorded.
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("[NEX] PANIC proto=%#x method=%d call=%d pid=%d: %v\n%s\n",
-				req.Protocol, req.Method, req.CallID, c.PID, r, dumpStacks())
-			c.SendRMC(NewRMCError(c.Settings, req.Protocol, req.CallID, ResultCoreUnknown))
-		}
-	}()
-
 	if c.Endpoint.OnRMC != nil {
 		c.Endpoint.OnRMC(c, req)
 	}
@@ -685,10 +649,10 @@ func (c *Connection) sendData(data []byte) {
 			rest = rest[fragSize:]
 			fragmentID++
 			// FIXED pacing between fragments, matching the proven server EXACTLY: the
-			// the previous stack measured blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
+			// nex-go capture blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
 			// ~200 ms at a steady ~16 ms/fragment, in strict order, WITHOUT stopping to
 			// wait for acks. Ack-driven windowing here instead took ~2.2 s, which tripped
-			// SSBU's native DataStore-fetch watchdog and crashed the emulator (the small
+			// SSBU's native DataStore-fetch watchdog and crashed Ryujinx (the small
 			// single-fragment arena responses were unaffected, which is why arenas worked
 			// but quick match didn't). retransmitLoop still backstops any dropped fragment.
 			if fragmentPacing > 0 {
@@ -700,10 +664,6 @@ func (c *Connection) sendData(data []byte) {
 
 // sendOneFragment sends a single reliable DATA fragment, allocating the next
 // reliable sequence id under the lock (so concurrent/async sends stay ordered).
-// The socket write itself happens OUTSIDE the lock: WriteMessage can block on
-// TCP backpressure when a client stops reading, and holding c.mu across it
-// would wedge every other send on the connection (including the retransmit
-// loop), turning one stuck client into a hung matchmaking handler.
 func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 	c.mu.Lock()
 	pid := c.outReliable
@@ -713,7 +673,7 @@ func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 		// NOT HasSize (0x8). With HasSize the console reads our plen field per fragment
 		// instead of the WebSocket frame length, which corrupts reassembly of a large
 		// multi-fragment payload (SSBU's 15 KB DataStore init) — it acks every fragment
-		// but never accepts the message. Match the measured exactly.
+		// but never accepts the message. Match the capture exactly.
 		Flags:      FlagReliable | FlagNeedACK,
 		SourceType: c.srcType, SourcePort: c.srcPort,
 		DestType: c.dstType, DestPort: c.dstPort,
@@ -723,9 +683,8 @@ func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 	}
 	c.outReliable++
 	encoded := EncodePacket(pkt)
-	c.mu.Unlock()
-
 	c.send(encoded)
+	c.mu.Unlock()
 
 	// Remember it for retransmission until the console acks it.
 	c.pendingMu.Lock()
@@ -771,12 +730,8 @@ func (c *Connection) retransmitLoop() {
 		c.pendingMu.Unlock()
 		for _, enc := range batch {
 			c.mu.Lock()
-			live := c.state != stateClosed
-			c.mu.Unlock()
-			if !live {
-				return
-			}
 			c.send(enc)
+			c.mu.Unlock()
 		}
 	}
 }

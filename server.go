@@ -15,8 +15,12 @@ import (
 // validators (e.g. gorilla) reject — and gws accepts it. Each socket carries one
 // Connection.
 type Server struct {
-	Endpoint          *Endpoint
-	conns             sync.Map // *gws.Conn -> *Connection
+	Endpoint *Endpoint
+	conns    sync.Map // *gws.Conn -> *Connection
+
+	// CustomHTTPHandler, when set, answers plain HTTP requests on a path other
+	// than "/" instead of attempting a WebSocket upgrade. nil by default, so the
+	// transport behaves exactly as before for every existing title.
 	CustomHTTPHandler func(w http.ResponseWriter, r *http.Request)
 }
 
@@ -31,7 +35,7 @@ func (s *Server) OnOpen(socket *gws.Conn) {
 		_ = socket.WriteMessage(gws.OpcodeBinary, b)
 	})
 	s.conns.Store(socket, conn)
-	fmt.Printf("[%s] [WS] open from %s\n", ts(), socket.RemoteAddr())
+	fmt.Printf("[WS] open from %s\n", socket.RemoteAddr())
 }
 
 // OnClose tears down the socket's Connection.
@@ -61,13 +65,7 @@ func (s *Server) OnMessage(socket *gws.Conn, message *gws.Message) {
 
 func (s *Server) mux() *http.ServeMux {
 	upgrader := gws.NewUpgrader(s, &gws.ServerOption{
-		// ParallelEnabled must stay FALSE: with it on, gws dispatches every
-		// message in its own goroutine, so the Connection's receive path
-		// (recvBuf/fragBuf, RMC handlers) would run concurrently per message —
-		// it is designed for strict serial processing. Parallel dispatch also
-		// lets gws.Recovery swallow a handler panic, leaving the console
-		// waiting forever on a response that will never come.
-		ParallelEnabled: false,
+		ParallelEnabled: true,
 		Recovery:        gws.Recovery,
 		ReadBufferSize:  64 * 1024,
 		WriteBufferSize: 64 * 1024,

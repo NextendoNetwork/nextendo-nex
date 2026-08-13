@@ -24,12 +24,12 @@ const (
 	MethodLoginWithContext uint32 = 6
 )
 
-// authPIDByIP remembers the NEX PID minted at LoginEx, keyed by the client's address.
-// A secure connection that arrives WITHOUT a decryptable ticket must reuse that same PID —
-// otherwise the session it hosts is owned by a PID the console doesn't recognise as itself,
-// and Pia gives up with 2618-562 SessionKeepFailed (the console waits forever for a "host"
-// that isn't it). Values are authRecall (PID + mint time); see RecallAuthPID for the rules.
-var authPIDByIP sync.Map // address host -> authRecall
+// authPIDByIP remembers the NEX PID minted at LoginEx, keyed by the client's IP.
+// The secure connection currently arrives WITHOUT a decryptable ticket (private-test
+// leniency) and must reuse that same PID — otherwise the session it hosts is owned
+// by a placeholder PID the console doesn't recognise as itself, and Pia gives up with
+// 2618-562 SessionKeepFailed (the console waits forever for a "host" that isn't it).
+var authPIDByIP sync.Map // ip host -> uint64
 
 func ipHost(addr string) string {
 	if h, _, err := net.SplitHostPort(addr); err == nil {
@@ -38,29 +38,29 @@ func ipHost(addr string) string {
 	return addr
 }
 
-// authRecall is a login PID remembered for ONE client address, with the instant it was
-// minted. It expires: an address→PID association that lived forever would let whoever holds
-// that address later (carrier-grade NAT, DHCP reuse, a peer behind the same public address)
-// inherit a stranger's identity on a ticketless secure CONNECT.
+// authRecall is a login PID remembered for ONE client IP, with the instant it was minted.
+// It expires: an IP→PID association that lives forever would let whoever holds that address
+// later (CGNAT/DHCP reuse, a peer behind the same public IP) inherit a stranger's identity on
+// a ticketless secure CONNECT.
 type authRecall struct {
 	pid uint64
 	at  time.Time
 }
 
-// authRecallTTL bounds how long a login PID may be inherited by a ticketless secure CONNECT
-// from the SAME address. It must cover a whole play session: a console re-CONNECTs to the
-// secure server repeatedly (lobby changes, reconnects) without necessarily replaying the
-// full auth, so a short window would refuse legitimate players mid-session.
+// authRecallTTL bounds how long a login PID may be inherited by a ticketless secure
+// CONNECT from the SAME IP. It must cover a whole play session: a console re-CONNECTs to
+// the secure server repeatedly (lobby changes, reconnects) without necessarily replaying
+// the full auth, so a short window would refuse legitimate players mid-session.
 const authRecallTTL = 24 * time.Hour
 
-// Persistence of the address→PID recall.
+// Persistence of the IP→PID recall.
 //
-// The table lives in memory, so a server RESTART empties it: every console already in a
-// session that re-CONNECTs to the secure port without replaying a full login would then be
-// refused. The address-agnostic fallback that used to paper over this was removed (it let a
-// client that never authenticated inherit another player's account), so the recall must
-// instead SURVIVE restarts. Writes are debounced off the request path; the file is re-read
-// at startup. Empty NEXTENDO_AUTH_RECALL_FILE = memory only.
+// The table lives in memory, so a server RESTART emptied it: every console already in a
+// session that re-CONNECTed to the secure port without replaying a full login was then
+// refused (measured on MK8: 40 refusals right after a restart, players stuck at 30/50).
+// The old code papered over that with the IP-agnostic fallback we removed for security, so
+// the recall must instead SURVIVE restarts. Writes are debounced off the request path;
+// the file is re-read at startup. Empty NEXTENDO_AUTH_RECALL_FILE = memory only.
 var (
 	authRecallFile  = os.Getenv("NEXTENDO_AUTH_RECALL_FILE")
 	authRecallOnce  sync.Once
@@ -69,10 +69,10 @@ var (
 
 const (
 	authRecallFlushEvery = 5 * time.Second
-	authRecallMax        = 50000 // hard bound: a recall table must not grow without end
+	authRecallMax        = 50000 // borne dure : une table de rappel ne doit pas croître sans fin
 )
 
-// authRecallPersisted is the on-disk shape (JSON: address -> {pid, unix seconds}).
+// authRecallPersisted is the on-disk shape (JSON: ip -> {pid, unix seconds}).
 type authRecallPersisted struct {
 	PID uint64 `json:"pid"`
 	At  int64  `json:"at"`
@@ -84,7 +84,8 @@ func authRecallInit() {
 		if authRecallFile == "" {
 			return
 		}
-		if b, err := os.ReadFile(authRecallFile); err == nil {
+		b, err := os.ReadFile(authRecallFile)
+		if err == nil {
 			var m map[string]authRecallPersisted
 			if json.Unmarshal(b, &m) == nil {
 				n := 0
@@ -96,7 +97,7 @@ func authRecallInit() {
 					authPIDByIP.Store(ip, authRecall{pid: rec.PID, at: at})
 					n++
 				}
-				fmt.Printf("[Auth] address->PID recall restored: %d entrie(s) from %s\n", n, authRecallFile)
+				fmt.Printf("[Auth] rappel IP→PID restauré : %d entrée(s) depuis %s\n", n, authRecallFile)
 			}
 		}
 		go authRecallFlusher()
@@ -120,7 +121,7 @@ func authRecallFlusher() {
 				return true
 			}
 			if time.Since(rec.at) > authRecallTTL {
-				authPIDByIP.Delete(ip) // expired: drop it while we are here
+				authPIDByIP.Delete(ip) // expirée : on la retire au passage
 				return true
 			}
 			if len(out) < authRecallMax {
@@ -133,8 +134,8 @@ func authRecallFlusher() {
 			continue
 		}
 		tmp := authRecallFile + ".tmp"
-		if os.WriteFile(tmp, b, 0600) == nil { // 0600: address↔player associations
-			_ = os.Rename(tmp, authRecallFile) // atomic replace
+		if os.WriteFile(tmp, b, 0600) == nil { // 0600 : associations IP→joueur
+			_ = os.Rename(tmp, authRecallFile) // remplacement atomique
 		}
 	}
 }
@@ -149,13 +150,14 @@ func RememberAuthPID(addr string, pid uint64) {
 // RecallAuthPID returns the login PID recently minted for THIS client address.
 //
 // SECURITY: this is the only identity a ticketless secure CONNECT may inherit, and only from
-// the very address that authenticated, within authRecallTTL. The former address-agnostic
-// fallback (“the most recent login PID minted by anyone”) was removed: the CONNECT signature
-// only proves knowledge of the access key every client embeds, not identity, so that
-// fallback let any client reaching the secure port take over the account of whoever had just
-// logged in — and, via the one-place-online gate, evict the real owner.
+// the very IP that authenticated, within authRecallTTL. The former IP-agnostic fallback
+// (“the most recent login PID minted by ANYONE in the last 8s”) was removed: it let anyone
+// who could reach the secure port — the PRUDP signature only proves knowledge of the PUBLIC
+// access key, not identity — take over the account of whoever had just logged in, and via the
+// one-place-online gate evict the real owner. Measured before removal: 8 uses fleet-wide vs
+// 243 legitimate same-IP recalls, so dropping it costs nothing real.
 func RecallAuthPID(addr string) (uint64, bool) {
-	authRecallInit() // the secure CONNECT may arrive before any login on this process
+	authRecallInit() // le CONNECT securise peut arriver avant tout login sur ce processus
 	v, ok := authPIDByIP.Load(ipHost(addr))
 	if !ok {
 		return 0, false

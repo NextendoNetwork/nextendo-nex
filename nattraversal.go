@@ -3,7 +3,25 @@ package nex
 import (
 	"fmt"
 	"net"
+	"os"
 )
+
+// probeRepointEnabled reports whether pushInitiateProbe must rewrite the station it
+// pushes to the endpoint the server observes for the caller. Off unless the game
+// server sets NEXTENDO_PROBE_REPOINT=1, so titles that already work are untouched.
+func probeRepointEnabled() bool {
+	v := os.Getenv("NEXTENDO_PROBE_REPOINT")
+	return v == "1" || v == "true"
+}
+
+// splitHostPortSafe is net.SplitHostPort, tolerating an address with no port.
+func splitHostPortSafe(addr string) (string, string, error) {
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr, "", nil
+	}
+	return h, p, nil
+}
 
 // NAT traversal protocol (P2P hole-punch coordination).
 const (
@@ -18,20 +36,13 @@ const (
 	MethodReportNATTraversalResultDetail uint32 = 0x7
 )
 
-// NATTraversalHandler coordinates the P2P hole-punch. The punch is a two-way
-// chain (kinnay's documented Pia flow): console A calls RequestProbeInitiation
-// (m=1) or RequestProbeInitiationExt (m=3) naming its target; the server pushes
-// InitiateProbe (m=2) to that target carrying A's station URL; the target then
-// probes A directly AND calls m=1/m=3 back on the server; the server MUST push
-// InitiateProbe to A in turn, and only then does A probe the target. If either
-// push is dropped the corresponding console never fires a probe, the other end
-// never gets a reply, and its ReportNATTraversalResult fails with rtt=0 even
-// though both NATs are perfectly punchable.
-//
-// m=1 carries only the target list (no station URL), so the URL it pushes is
-// the caller's REGISTERED station; m=3 carries the caller's own station URL
-// (the endpoint its NAT check confirmed), which we push verbatim (rewritten to
-// the relay socket in relay mode).
+// NATTraversalHandler coordinates the P2P hole-punch. The key method is
+// RequestProbeInitiationExt: when a client asks the server to have its peers
+// probe it back, we push an InitiateProbe request to each target carrying the
+// caller's own station URL, so BOTH ends fire UDP probes and open their NATs at
+// the same time. The stock flow opens only the joiner's NAT, leaving the other
+// console's Pia waiting ("communication error"). Every other method is a simple
+// acknowledgement (the actual hole-punch happens directly between the consoles).
 func NATTraversalHandler() RMCHandler {
 	return func(conn *Connection, req *RMCMessage) *RMCMessage {
 		switch req.Method {
@@ -63,8 +74,8 @@ func natAck(conn *Connection, req *RMCMessage) *RMCMessage {
 // relaySignatureKey answers GetRelaySignatureKey — the relay handshake the NEWER Pia (Mario
 // Strikers, with its RelayMesh stack) performs before starting the match, which MK8/S2/SSBU's older
 // direct-mesh Pia never calls. NOT a relay server: we advertise NO relay (empty address, port 0) —
-// exactly what the previous server returns — so the game gets a well-formed "no relay offered" and
-// proceeds on its DIRECT mesh (which the packet measured proved works bidirectionally). Left
+// exactly what Pretendo's server returns — so the game gets a well-formed "no relay offered" and
+// proceeds on its DIRECT mesh (which the packet capture proved works bidirectionally). Left
 // unhandled it fell through to a malformed empty-list the game cannot parse -> its match-start
 // handshake never completes -> the match connects but never renders (the black screen). Response
 // layout: [relayMode i32][currentUTCTime DateTime][relay address String][port u16][addressType i32]
@@ -83,104 +94,64 @@ func relaySignatureKey(conn *Connection, req *RMCMessage) *RMCMessage {
 
 // pushInitiateProbe relays a server→client InitiateProbe to every target the
 // caller named, carrying the caller's own station URL so each target probes back.
-//
-// The payload URL cannot be pushed verbatim: this client advertises its own
-// station in the payload as the GAME SERVER's address with its own
-// NAT-checked port (34.174.141.27:59472 in this deployment) — the address of
-// the server it is connected to, not an endpoint the target can reach. Pushing
-// that verbatim sends the punch at the server IP on a port nothing listens on,
-// and every probe dies there (rtt=0) even though both NATs are perfectly
-// punchable. So the pushed URL is the payload repointed at the endpoint the
-// server actually observes: the caller's real IP and the UDP port the nncs
-// responder confirmed (the relay socket in relay mode). Every other parameter
-// (RVCID, PID, CID, natf, probeinit, type) is preserved.
 func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 	s := conn.Settings
 	in := NewStreamIn(req.Body, s)
 	targetList := ReadList(in, func(i *StreamIn) string { return i.String() })
-	payloadURL := in.String()
+	stationToProbe := in.String()
 	if in.Err() != nil {
 		return
 	}
 
-	u := ParseStationURL(payloadURL)
-	if rHost, rPort, rOn := stationRelay(); rOn {
-		u.Set("address", rHost)
-		u.SetInt("port", rPort)
-	} else if host, _, err := net.SplitHostPort(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
-		u.Set("address", host)
-		if p, ok := natPortForIP(host); ok {
-			u.SetInt("port", p)
+	// Optional repointing (NEXTENDO_PROBE_REPOINT=1), OFF by default.
+	//
+	// Some clients advertise, in this payload, a station whose ADDRESS is the game
+	// server's own — the host they are talking to — carrying their NAT-checked port.
+	// Pushed verbatim, the peer then fires its punch at the SERVER's address on a port
+	// nothing listens on, so every probe dies (rtt=0) even though both NATs are
+	// perfectly punchable. Repointing rewrites that address to the endpoint the server
+	// actually observes for the caller (its real public IP, and the UDP port the NAT
+	// responder confirmed), leaving every other parameter untouched.
+	//
+	// Left off for the titles whose clients already advertise their own public
+	// endpoint (their probes work as-is); enabled per game server.
+	if probeRepointEnabled() {
+		if host, _, err := splitHostPortSafe(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
+			u := ParseStationURL(stationToProbe)
+			if u.Get("address") != host {
+				u.Set("address", host)
+			}
+			if p, ok := natPortForIP(host); ok {
+				u.SetInt("port", p)
+			}
+			repointed := u.String()
+			if repointed != stationToProbe {
+				fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: station repointée vers l'endpoint observé %s\n", conn.PID, repointed)
+				stationToProbe = repointed
+			}
 		}
 	}
-	pushed := u.String()
-
-	fmt.Printf("[NAT] pid=%d RequestProbeInitiationExt targets=%d payload=%s\n",
-		conn.PID, len(targetList), payloadURL)
-	fmt.Printf("[NAT] pid=%d push InitiateProbe -> station=%s\n", conn.PID, pushed)
 
 	// The InitiateProbe request body is a single station URL (the caller's).
 	probe := NewStreamOut(s)
-	probe.StationURL(ParseStationURL(pushed))
-	pushProbeToTargets(conn, req, targetList, probe.Bytes())
-}
-
-// pushInitiateProbeFromStored handles RequestProbeInitiation (m=1): the same
-// push as the Ext variant, but the request carries only the target list — no
-// station URL — so the pushed URL is the caller's REGISTERED station (the relay
-// socket in relay mode, else the endpoint the NAT check confirmed). This is the
-// call the target console makes when IT receives its push, and without this push
-// going out in turn the original caller never fires a single probe.
-func pushInitiateProbeFromStored(conn *Connection, req *RMCMessage) {
-	s := conn.Settings
-	in := NewStreamIn(req.Body, s)
-	targetList := ReadList(in, func(i *StreamIn) string { return i.String() })
-	if in.Err() != nil {
-		return
-	}
-
-	stationToProbe := bestStationURL(conn)
-	if stationToProbe == "" {
-		fmt.Printf("[NAT] pid=%d RequestProbeInitiation targets=%d NO station url, skip push\n",
-			conn.PID, len(targetList))
-
-		return
-	}
-
-	fmt.Printf("[NAT] pid=%d RequestProbeInitiation targets=%d stationToProbe=%s\n",
-		conn.PID, len(targetList), stationToProbe)
-
-	probe := NewStreamOut(s)
 	probe.StationURL(ParseStationURL(stationToProbe))
-	pushProbeToTargets(conn, req, targetList, probe.Bytes())
-}
+	probeBody := probe.Bytes()
 
-// pushProbeToTargets sends the InitiateProbe push (body already built) to every
-// target in the list, resolved by RVCID (falling back to PID). Server-initiated
-// requests use a distinct call-id space.
-func pushProbeToTargets(conn *Connection, req *RMCMessage, targetList []string, probeBody []byte) {
-	s := conn.Settings
 	for _, raw := range targetList {
-		u := ParseStationURL(raw)
-		rvcid := uint32(u.GetInt("RVCID"))
-		var target *Connection
-		if rvcid != 0 {
-			target = conn.Endpoint.FindConnectionByID(rvcid)
+		rvcid := uint32(ParseStationURL(raw).GetInt("RVCID"))
+		if rvcid == 0 {
+			fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: cible sans RVCID (%q) — IGNORÉE\n", conn.PID, raw)
+			continue
 		}
-		if target == nil {
-			if pid := uint64(u.GetInt("PID")); pid != 0 {
-				target = conn.Endpoint.FindConnectionByPID(pid)
-			}
-		}
+		target := conn.Endpoint.FindConnectionByID(rvcid)
 		if target == nil {
 			fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: cible RVCID=%d INTROUVABLE — pas d'InitiateProbe\n", conn.PID, rvcid)
 			continue
 		}
 		// Server-initiated requests use a distinct call-id space.
 		fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d -> InitiateProbe VERS pid=%d (id=%d rvcid=%d) station=%q\n",
-			conn.PID, target.PID, target.ID, rvcid, string(probeBody))
+			conn.PID, target.PID, target.ID, rvcid, stationToProbe)
 		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, probeBody))
-		fmt.Printf("[NAT] pid=%d push InitiateProbe -> cid=%d url=%s\n", conn.PID, target.ID, string(probeBody))
 	}
 }
 

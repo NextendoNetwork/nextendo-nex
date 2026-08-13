@@ -19,9 +19,11 @@ func TestUtilityAndRankingStubs(t *testing.T) {
 		t.Fatalf("ranking upload: %+v", r)
 	}
 
-	// Ranking worldwide (0x16) → empty list (u32 count 0).
-	w := RankingHandler()(conn, NewRMCRequest(s, ProtocolRanking, methodRankingWorldwide, 3, nil))
+	// Ranking 0x16 with no usable body → still the empty list (u32 count 0), and
+	// NEVER an error: left unanswered, this method was the worldwide wall
+	// (2618-0006). Serving real profiles must not change that guarantee.
+	w := RankingHandler()(conn, NewRMCRequest(s, ProtocolRanking, methodRankingCommonDataByPIDs, 3, nil))
 	if w.IsError || len(w.Body) != 4 {
-		t.Fatalf("ranking worldwide: %+v", w)
+		t.Fatalf("ranking common-data fallback: %+v", w)
 	}
 }

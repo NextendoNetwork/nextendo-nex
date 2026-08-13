@@ -2,6 +2,7 @@ package nex
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -44,8 +45,8 @@ const (
 	// UpdateApplicationBuffer(gid, buffer) is how a HOST publishes its match configuration
 	// into the gathering — Smash sends ~422 bytes of it as soon as a lobby forms. Joiners
 	// read it back off the session, so refusing it leaves them with a session they cannot
-	// interpret and the lobby loops back to matchmaking (2618-0006). The the previous stack
-	// implemented it (the previous stack)
+	// interpret and the lobby loops back to matchmaking (2618-0006). The nex-go stack
+	// implemented it (nex-protocols-common-go/matchmake-extension/update_application_buffer.go)
 	// and this core did not — a host's buffer was silently rejected on every lobby.
 	MethodUpdateApplicationBuffer uint32 = 0x0B
 
@@ -77,7 +78,12 @@ const (
 	MethodSSBUArenaCode     uint32 = 0x37 // arena code create (same struct as MK8 0x44)
 	MethodSSBUArenaResolve  uint32 = 0x38 // resolve arena code → bare u32 gid (like 0x45)
 	MethodFindByGidList     uint32 = 0x30 // FindMatchmakeSessionByGatheringID (list<gid> → list<session>)
-	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (measured Nintendo value)
+	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (captured Nintendo value)
+	// Tournois Mario Kart 8, relevés sur la capture du serveur de Nintendo :
+	// 0x39 recherche (critère → liste), 0x3F inscription (id → réponse vide).
+	// 0x3A est partagé avec la sonde SSBU ci-dessus, d'où le tri par forme.
+	MethodTournamentSearch uint32 = 0x39
+	MethodTournamentJoin   uint32 = 0x3F
 
 	// MatchMakingExt (0x32)
 	MethodEndParticipation uint32 = 0x1
@@ -93,30 +99,6 @@ type gathering struct {
 // Matchmaking is the in-memory matchmaking store + handlers, replicating the
 // proven server's session lifecycle (create/join, participant tracking) and the
 // server→client Participate notification the console's Pia waits on.
-// rmcTrace is a rolling ring of RMC calls for one connection.
-type rmcTrace [10]struct {
-	T      time.Time
-	Proto  uint16
-	Method uint32
-	CallID uint32
-	Body   string // first 64 hex chars of body
-}
-
-func (t *rmcTrace) push(proto uint16, method uint32, callID uint32, body []byte) {
-	copy(t[:], t[1:])
-	n := len(body)
-	if n > 32 {
-		n = 32
-	}
-	t[len(t)-1] = struct {
-		T      time.Time
-		Proto  uint16
-		Method uint32
-		CallID uint32
-		Body   string
-	}{time.Now(), proto, method, callID, fmt.Sprintf("%x", body[:n])}
-}
-
 type Matchmaking struct {
 	// FindByParticipantEnabled fait répondre RÉELLEMENT à FindMatchmakeSessionByParticipant
 	// (0x6D.0x33) au lieu d'une liste vide. Animal Crossing s'en sert pour la visite d'île
@@ -136,7 +118,7 @@ type Matchmaking struct {
 	// éprouvée contre leur serveur.
 	PublicStationFirst bool
 	// JoinRespExistingCount fait renvoyer, dans la réponse à JoinMatchmakeSessionWithParam, le
-	// nombre de participants AVANT l'ajout du visiteur (comme the previous stack) au lieu d'après. La Pia
+	// nombre de participants AVANT l'ajout du visiteur (comme nex-go) au lieu d'après. La Pia
 	// d'Animal Crossing dimensionne son maillage P2P sur ce nombre : compté inclus, le visiteur
 	// attend une « autre console » fantôme et échoue (2618-0502). Défaut false : MK8 (AutoMatchmake)
 	// et SSBU gardent le comptage après-ajout avec lequel ils fonctionnent.
@@ -145,14 +127,12 @@ type Matchmaking struct {
 	// entre amis (méthodes 9/10/13). nil = aucun ami, donc listes vides : le comportement
 	// des jeux qui n'utilisent pas ce mécanisme.
 	FriendPIDs func(pid uint64) []uint64
-	// FriendName fournit le nom affichable d'un ami, pour les éléments de la réponse de
-	// la méthode 15 (le client les montre dans le menu « avec amis »). nil = chaîne vide.
+	// FriendName gives a friend's display name for the entries of method 15. nil = "".
 	FriendName func(pid uint64) string
-	// OnFriendSessionCreated, quand il est défini, est appelé juste après que l'hôte a
-	// créé une session (0x26) avec (pid de l'hôte, gid). Les jeux dont le client
-	// n'appelle jamais UpdateNotificationData (0x6D/9) lui-même (LM3) s'en servent pour
-	// publier la donnée « salle ouverte » de l'hôte pour ses amis (m10/m13). nil par
-	// défaut : les jeux qui publient eux-mêmes (ACNH) restent inchangés.
+	// OnFriendSessionCreated, when set, is called right after a host creates a session
+	// (pid, gid). Titles whose client never publishes its own "room open" notification
+	// data use it to publish on the host's behalf. nil by default, so the titles that
+	// publish themselves are unchanged.
 	OnFriendSessionCreated func(pid uint64, gid uint32)
 
 	notif      *notifStore
@@ -161,42 +141,11 @@ type Matchmaking struct {
 	byCode     map[string]uint32
 	nextGID    uint32
 	codeRand   uint32
-	trace      map[uint64]*rmcTrace // per-PID RMC call history
-}
-
-// TraceCall records an RMC call in the per-PID ring.
-func (m *Matchmaking) TraceCall(pid uint64, proto uint16, method uint32, callID uint32, body []byte) {
-	m.mu.Lock()
-	t := m.trace[pid]
-	if t == nil {
-		t = &rmcTrace{}
-		m.trace[pid] = t
-	}
-	m.mu.Unlock()
-	t.push(proto, method, callID, body)
-}
-
-// dumpTrace prints the last N RMC calls for a PID.
-func (m *Matchmaking) dumpTrace(pid uint64) string {
-	m.mu.Lock()
-	t := m.trace[pid]
-	m.mu.Unlock()
-	if t == nil {
-		return "(no trace)"
-	}
-	var out string
-	for _, e := range t {
-		if e.T.IsZero() {
-			continue
-		}
-		out += fmt.Sprintf("\n  %s proto=%#x method=%d call=%d body=%s", e.T.Format("15:04:05.000"), e.Proto, e.Method, e.CallID, e.Body)
-	}
-	return out
 }
 
 // NewMatchmaking returns an empty store.
 func NewMatchmaking() *Matchmaking {
-	return &Matchmaking{gatherings: map[uint32]*gathering{}, byCode: map[string]uint32{}, nextGID: 1, codeRand: 0x1234, notif: newNotifStore(), trace: map[uint64]*rmcTrace{}}
+	return &Matchmaking{gatherings: map[uint32]*gathering{}, byCode: map[string]uint32{}, nextGID: 1, codeRand: 0x1234, notif: newNotifStore()}
 }
 
 // ExtensionHandler handles MatchmakeExtension (0x6D).
@@ -234,8 +183,6 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.getFriendNotificationData(conn, req, false)
 		case MethodGetFriendNotificationDataList:
 			return m.getFriendNotificationData(conn, req, true)
-		case MethodGetFriendNotificationDataByPID:
-			return m.getFriendNotificationDataByPID(conn, req)
 		case MethodUpdateMatchmakeSessionPart:
 			return m.updateSessionPart(conn, req)
 		case MethodUpdateApplicationBuffer:
@@ -253,10 +200,28 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 		case MethodBrowseNoHolder:
 			return m.browseNoHolder(conn, req)
 		case MethodSSBUPreMatch:
-			// SSBU sends this right before AutoMatchmake; the real console got u32=2.
+			// MÊME NUMÉRO, DEUX JEUX. Pour SSBU c'est la sonde qui précède
+			// AutoMatchmake, et la console réelle recevait u32=2. Pour Mario Kart
+			// c'est « donne-moi ces tournois » : le jeu envoie une liste d'ids et
+			// attend une LISTE en retour. Lui répondre 2 lui faisait lire deux
+			// entrées inexistantes au-delà du tampon.
+			//
+			// On distingue par la forme de la requête, mesurée sur capture : MK8
+			// envoie u32 nombre + nombre × u32, donc exactement 4+4n octets.
+			if isTournamentIDList(req.Body) {
+				return m.tournamentsByIDs(conn, req)
+			}
 			out := NewStreamOut(conn.Settings)
 			out.U32(2)
 			return NewRMCSuccess(conn.Settings, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+		case MethodTournamentSearch:
+			return m.searchTournaments(conn, req)
+		case MethodTournamentCreate:
+			return m.createTournament(conn, req)
+		case MethodTournamentDelete:
+			return m.removeTournament(conn, req)
+		case MethodTournamentJoin:
+			return m.registerTournament(conn, req)
 		case MethodUpdateProgressScore:
 			// The console updates its progress score during the session-keep loop.
 			// The proven server just acks (no body); refusing it stalls the loop.
@@ -270,8 +235,6 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 // MatchMakingHandler handles MatchMaking (0x15).
 func (m *Matchmaking) MatchMakingHandler() RMCHandler {
 	return func(conn *Connection, req *RMCMessage) *RMCMessage {
-		m.TraceCall(conn.PID, req.Protocol, req.Method, req.CallID, req.Body)
-		fmt.Printf("[0x15] pid=%d method=%d call=%d body=%x\n", conn.PID, req.Method, req.CallID, req.Body)
 		switch req.Method {
 		case MethodGetSessionURLs:
 			return m.getSessionURLs(conn, req)
@@ -353,7 +316,7 @@ func (s *SimplePlayingSession) Levels() []Level {
 // friend list calls this with the PIDs of friends it wants to join; for each PID
 // that is actually in a live gathering we return that gathering's id, so the
 // joiner can then FindMatchmakeSessionBySingleID + JoinMatchmakeSession. Returning
-// an empty list (what the game server did before) makes every friend-join fail because the
+// an empty list (what mk8cs did before) makes every friend-join fail because the
 // joiner never learns which session to join. Request = list<PID> + bool
 // (include the caller's own session).
 func (m *Matchmaking) playingSession(conn *Connection, req *RMCMessage) *RMCMessage {
@@ -394,6 +357,14 @@ func (m *Matchmaking) playingSession(conn *Connection, req *RMCMessage) *RMCMess
 
 // finalizeCreatedSession sets every field the server owns on a freshly created
 // session; a session missing these is rejected by the console.
+// openParticipationDefault reports whether a freshly created session must be marked
+// open + active so other players can be matched into it. Off unless the game server sets
+// NEXTENDO_OPEN_PARTICIPATION=1.
+func openParticipationDefault() bool {
+	v := os.Getenv("NEXTENDO_OPEN_PARTICIPATION")
+	return v == "1" || v == "true"
+}
+
 func finalizeCreatedSession(session *MatchmakeSession, gid uint32, ownerPID uint64) {
 	session.ID = gid
 	session.OwnerPID = ownerPID
@@ -405,34 +376,27 @@ func finalizeCreatedSession(session *MatchmakeSession, gid uint32, ownerPID uint
 	session.SessionKey = randomBytes(32)
 	session.StartedTime = NowDateTime()
 	session.SystemPasswordEnabled = false
-	session.UserPasswordEnabled = false
-	session.State = 1 // Open/Active
-	session.OpenParticipation = true // Host can be found by joiners
+	// Optional (NEXTENDO_OPEN_PARTICIPATION=1), OFF by default.
+	//
+	// autoMatchmake only ever joins a candidate whose OpenParticipation is set. Titles
+	// whose client fills that flag itself are matched normally; for a title whose client
+	// leaves it clear, EVERY lobby looks closed, so each player opens their own and waits
+	// alone forever (the game then times out with a communication error). Marking the
+	// session open + active at creation makes those hosts findable. Enabled per game
+	// server so the titles that already match correctly are untouched.
+	if openParticipationDefault() {
+		session.UserPasswordEnabled = false
+		session.State = 1 // open / active
+		session.OpenParticipation = true
+	}
 	for len(session.Attribs) < 6 {
 		session.Attribs = append(session.Attribs, 0)
 	}
 	if session.Param.Params == nil {
 		session.Param.Params = map[string]Variant{}
 	}
-	// Strip empty-key entries that arise from NUL-terminated key serialization.
-	for k := range session.Param.Params {
-		if k == "" || k == "\x00" {
-			delete(session.Param.Params, k)
-		}
-	}
-	lm3SessionParams := map[string]Variant{
-		"@UsGI": {Type: VariantBool, Bool: true},
-		"@UpGI": {Type: VariantBool, Bool: true},
-		"@CC":   {Type: VariantUint64, Uint: 0},
-		"@RV":   {Type: VariantUint64, Uint: 1},
-		"@DR":   {Type: VariantUint64, Uint: 0},
-		"@VR":   {Type: VariantUint64, Uint: 34}, // match appVersion 0x22 from ApplicationData
-		"@TS":   {Type: VariantUint64, Uint: 8},
-		"@SR":   {Type: VariantBool, Bool: true},
-	}
-	for k, v := range lm3SessionParams {
-		session.Param.Params[k] = v
-	}
+	session.Param.Params["@SR"] = Variant{Type: VariantBool, Bool: true}
+	session.Param.Params["@GIR"] = Variant{Type: VariantInt64, Int: 3}
 }
 
 // createGathering registers a new gathering owned by the caller (mutex held).
@@ -450,7 +414,7 @@ func (m *Matchmaking) createGathering(conn *Connection, src *MatchmakeSession) *
 // when a new player (not the owner) joins — the event Pia's WaitNotification
 // blocks on. The joiner is never notified of its own join.
 // notifyParticipation replicates the proven server's join notifications, taken
-// byte-for-byte from a live 2-player measured:
+// byte-for-byte from a live 2-player capture:
 //  1. Participate(3001) about the CALLER (Param2=caller) -> pushed to EVERY current
 //     participant, INCLUDING the caller itself. The deployed server does NOT self-
 //     exclude: a lone host needs its own event to leave Pia's WaitNotification wall
@@ -472,7 +436,7 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 		}
 		SendNotification(target, &NotificationEvent{
 			PIDSource: caller.PID, Type: NotificationParticipate,
-			Param1: uint64(gid), Param2: caller.PID, StrParam: participationStationData(caller.PID, participants, ep), Param3: uint64(count),
+			Param1: uint64(gid), Param2: caller.PID, StrParam: joinMessage, Param3: uint64(count),
 		})
 	}
 	// 2. Recap to the caller: each pre-existing participant.
@@ -481,33 +445,12 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 			continue
 		}
 		SendNotification(caller, &NotificationEvent{
-			PIDSource: pid, Type: NotificationParticipate,
-			Param1: uint64(gid), Param2: pid, StrParam: participationStationData(pid, participants, ep), Param3: uint64(count),
+			PIDSource: caller.PID, Type: NotificationParticipate,
+			Param1: uint64(gid), Param2: pid, StrParam: joinMessage, Param3: uint64(count),
 		})
 	}
-	fmt.Printf("[%s] [MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
-		ts(), gid, caller.PID, count, count-1, participants)
-}
-
-// participationStationData is the compact station-id list consumed by S2's Pia mesh
-// notification handler. Param2 carries the participant PID; these entries carry the
-// corresponding server connection IDs (RVCIDs) used by NAT traversal.
-func participationStationData(first uint64, participants []uint64, endpoint *Endpoint) string {
-	ids := [4]uint64{first}
-	if connection := endpoint.FindConnectionByPID(first); connection != nil {
-		ids[0] = uint64(connection.ID)
-	}
-	count := 1
-	for _, pid := range participants {
-		if pid == first || count == len(ids) {
-			continue
-		}
-		if connection := endpoint.FindConnectionByPID(pid); connection != nil {
-			ids[count] = uint64(connection.ID)
-		}
-		count++
-	}
-	return fmt.Sprintf("0x%016x:%016x:%016x:%016x", ids[0], ids[1], ids[2], ids[3])
+	fmt.Printf("[MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
+		gid, caller.PID, count, count-1, participants)
 }
 
 // [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to
@@ -597,7 +540,6 @@ func gatheringNATCompatible(ep *Endpoint, joiner natClass, members []uint64, joi
 
 func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
-	fmt.Printf("[%s] [MM] autoMatchmake request body=%x\n", ts(), req.Body)
 	var param AutoMatchmakeParam
 	in := NewStreamIn(req.Body, s)
 	in.Extract(&param)
@@ -635,6 +577,7 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 			}
 		}
 	}
+	joined := false
 	if g == nil {
 		g = m.createGathering(conn, src)
 		if soloForced {
@@ -648,39 +591,22 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 		}
 	} else if !containsPID(g.participants, conn.PID) {
 		g.participants = append(g.participants, conn.PID)
+		joined = true
 	}
 	g.session.NumParticipants = uint32(len(g.participants))
 	result := *g.session
-	// Deep-copy the param map so we don't mutate the persistent session.
-	if result.Param.Params != nil {
-		cp := make(map[string]Variant, len(result.Param.Params))
-		for k, v := range result.Param.Params {
-			cp[k] = v
-		}
-		result.Param.Params = cp
-	}
-	// finalizeCreatedSession already stamped all session params.
 	gid, count := g.session.ID, len(g.participants)
-	parts := make([]uint64, len(g.participants))
-	copy(parts, g.participants)
+	parts := append([]uint64(nil), g.participants...)
 	out := NewStreamOut(s)
 	out.Add(&result)
 	m.mu.Unlock()
 
-	// Self-notify the host (same as createSession) so the host leaves Pia's
-	// WaitNotification wall instead of hanging on "could not join game".
+	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v respLen=%d\n  resp=%x\n",
+		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(out.Bytes()), out.Bytes())
+	// Always notify the owner of the participation — including the lone-host self-join
+	// (joined==false), which is the case Pia needs to leave the WaitNotification wall.
+	_ = joined
 	m.notifyParticipation(conn, parts, gid, "")
-
-	keys := make([]string, 0, len(result.Param.Params))
-	for k := range result.Param.Params {
-		keys = append(keys, k)
-	}
-	paramDump := ""
-	for k, v := range result.Param.Params {
-		paramDump += fmt.Sprintf(" %s=%+v", k, v)
-	}
-	fmt.Printf("[%s] [MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d count=%d mode=%d flags=%d state=%d open=%t minP=%d maxP=%d skLen=%d attribs=%v appDataLen=%d appData=%x paramKeys=%v params=[%s] respLen=%d\n  resp=%x\n",
-		ts(), conn.PID, gid, result.OwnerPID, result.HostPID, count, result.GameMode, result.Flags, result.State, result.OpenParticipation, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(result.ApplicationData), result.ApplicationData, keys, paramDump, len(out.Bytes()), out.Bytes())
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 
@@ -743,11 +669,11 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 	}
 	g.session.NumParticipants = uint32(len(g.participants))
 	result := *g.session
-	// La réponse au JOIN doit annoncer le nombre de participants tel que le serveur the previous stack de
+	// La réponse au JOIN doit annoncer le nombre de participants tel que le serveur nex-go de
 	// référence le renvoie : le compte AVANT ajout du visiteur (juste l'hôte = 1), PAS après (2).
 	// La Pia d'Animal Crossing bâtit son maillage P2P d'après ce nombre : compté inclus (2), le
 	// visiteur attend une 2ᵉ « autre console » qui n'existe pas et échoue sur « one or more other
-	// consoles are not responding » (2618-0502). Mesuré : the previous stack Join/39 = NumParticipants 1.
+	// consoles are not responding » (2618-0502). Mesuré : nex-go Join/39 = NumParticipants 1.
 	if m.JoinRespExistingCount && joined {
 		result.NumParticipants = uint32(existing)
 	}
@@ -853,7 +779,7 @@ func (m *Matchmaking) browseNoHolder(conn *Connection, req *RMCMessage) *RMCMess
 		}
 		r := *g.session
 		// Recherche par Dodo Code (ACNH, wantCode!="") : le demandeur détient le code, il est
-		// donc autorisé à rejoindre → on GARDE la clé de session, comme the previous stack et comme
+		// donc autorisé à rejoindre → on GARDE la clé de session, comme nex-go et comme
 		// findByParticipant, sinon la visite cale (2618-0502). Recherche publique sans code
 		// (arène Smash) : on la retire pour ne pas la divulguer à un simple scan.
 		if wantCode == "" {
@@ -989,7 +915,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 		time.Sleep(hostReplaceURLPoll)
 
 		if urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst); status == bridgeOK {
-			fmt.Printf("[%s] [MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", ts(), conn.PID)
+			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
 			conn.SendRMC(sessionURLsResponse(conn, req, urls))
 
 			return
@@ -998,7 +924,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 
 	// Out of time: answer with whatever the host reported. Not answering at all would
 	// leave the joiner hanging until ITS timeout, which is strictly worse.
-	fmt.Printf("[%s] [MM] GetSessionURLs pid=%d: host never reported its ReplaceURL -> raw stations\n", ts(), conn.PID)
+	fmt.Printf("[MM] GetSessionURLs pid=%d: host never reported its ReplaceURL -> raw stations\n", conn.PID)
 	conn.SendRMC(sessionURLsResponse(conn, req, host.Stations()))
 }
 
@@ -1016,26 +942,20 @@ func (m *Matchmaking) unregister(conn *Connection, req *RMCMessage) {
 	g, existed := m.gatherings[gid]
 	var owner uint64
 	mine := false
-	snapshot := "(none)"
 	if existed {
 		owner = g.session.OwnerPID
 		mine = owner == conn.PID
-		snapshot = fmt.Sprintf("state=%d mode=%d flags=%d open=%t minP=%d maxP=%d parts=%d partsList=%v started=%s",
-			g.session.State, g.session.GameMode, g.session.Flags, g.session.OpenParticipation,
-			g.session.MinParticipants, g.session.MaxParticipants, len(g.participants), g.participants,
-			time.Unix(int64(g.session.StartedTime), 0).Format(time.TimeOnly))
 	}
+	// [MC churn diag] Only the OWNER may unregister their gathering. A caller unregistering
+	// a gathering it does not own would silently delete another player's live lobby (making
+	// it un-browsable) — never legitimate. Log every call to see whether MC is tearing down
+	// its OWN just-created host session (the suspected churn cause).
 	if existed && mine {
 		delete(m.gatherings, gid)
-		// L'hôte a refermé sa salle : sa « porte ouverte » ne doit pas survivre à la
-		// session, sinon elle resterait proposée à ses amis (salle fantôme au m13).
-		m.notif.forget(owner)
 	}
 	m.mu.Unlock()
-	trace := m.dumpTrace(conn.PID)
-	fmt.Printf("[%s] [MM] unregister caller=%d gid=%d existed=%v owner=%d mine=%v session=[%s] -> %s\n  last-RMC:%s\n",
-		ts(), conn.PID, gid, existed, owner, mine, snapshot,
-		map[bool]string{true: "REMOVED", false: "kept (not owner / gone)"}[existed && mine], trace)
+	fmt.Printf("[MM] unregister caller=%d gid=%d existed=%v owner=%d mine=%v -> %s\n",
+		conn.PID, gid, existed, owner, mine, map[bool]string{true: "REMOVED", false: "kept (not owner / gone)"}[existed && mine])
 }
 
 // setParticipation implements MatchmakeExtension CloseParticipation(0x01) /
@@ -1080,7 +1000,7 @@ func (m *Matchmaking) setParticipation(conn *Connection, req *RMCMessage, open b
 // an empty success — an acknowledgement, which is all the client is waiting for.
 //
 // What matters is that it is answered at all. NotImplemented aborts the finish with
-// 2306-0103 immediately after the results screen. This was implemented in the previous stack
+// 2306-0103 immediately after the results screen. This was implemented in the nex-go stack
 // and lost when Splatoon 2 moved to this core.
 func (m *Matchmaking) updateSessionPart(conn *Connection, req *RMCMessage) *RMCMessage {
 	// Animal Crossing transmet ICI le « Dodo Code » de l hote : sans ecriture reelle, la
@@ -1281,14 +1201,9 @@ func (m *Matchmaking) endParticipation(conn *Connection, req *RMCMessage) {
 	gid := NewStreamIn(req.Body, conn.Settings).U32()
 	m.mu.Lock()
 	if g := m.gatherings[gid]; g != nil {
-		owner := g.session.OwnerPID
 		g.participants = removePID(g.participants, conn.PID)
 		if len(g.participants) == 0 {
 			delete(m.gatherings, gid)
-			// L'hôte a quitté en dernier : sa salle fermée ne doit plus apparaître au m13.
-			if owner == conn.PID {
-				m.notif.forget(owner)
-			}
 		} else {
 			g.session.NumParticipants = uint32(len(g.participants))
 		}
@@ -1314,6 +1229,36 @@ func (m *Matchmaking) makeCode(gid uint32) string {
 	return code
 }
 
+func containsPID(list []uint64, pid uint64) bool {
+	for _, p := range list {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
+func removePID(list []uint64, pid uint64) []uint64 {
+	out := make([]uint64, 0, len(list))
+	for _, p := range list {
+		if p != pid {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TraceCall is an optional per-PID call trace hook. The core keeps no history of its
+// own; a game server that wants one records calls here. No-op by default (the ring is
+// only allocated on first use), so titles that never call it pay nothing.
+func (m *Matchmaking) TraceCall(pid uint64, proto uint16, method uint32, callID uint32, body []byte) {
+	_ = pid
+	_ = proto
+	_ = method
+	_ = callID
+	_ = body
+}
+
 // GatheringIDByPID returns the id of the gathering the given PID is in.
 // Titles that publish "which room is my friend in" need the id itself, not just
 // the participant list. Must NOT be called while holding m.mu.
@@ -1333,8 +1278,8 @@ func (m *Matchmaking) GatheringIDByPID(pid uint64) (uint32, bool) {
 	return 0, false
 }
 
-// SessionByPID returns the participant PID list for the gathering the given PID
-// is in, or nil if the PID is not in any gathering. Must NOT hold m.mu.
+// SessionByPID returns the participant PID list of the gathering the given PID is in,
+// or nil when it is in none. Must NOT be called while holding m.mu.
 func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1353,21 +1298,14 @@ func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
 	return nil
 }
 
-func containsPID(list []uint64, pid uint64) bool {
-	for _, p := range list {
-		if p == pid {
-			return true
-		}
+// isTournamentIDList reconnaît la requête « donne-moi ces tournois » de Mario
+// Kart : u32 nombre, suivi d'exactement autant d'identifiants sur 32 bits (la
+// capture en montre 85, soit 344 octets). La sonde SSBU qui partage ce numéro
+// de méthode n'a pas cette forme, d'où un tri fiable sans connaître le jeu.
+func isTournamentIDList(body []byte) bool {
+	if len(body) < 8 || len(body)%4 != 0 {
+		return false
 	}
-	return false
-}
-
-func removePID(list []uint64, pid uint64) []uint64 {
-	out := make([]uint64, 0, len(list))
-	for _, p := range list {
-		if p != pid {
-			out = append(out, p)
-		}
-	}
-	return out
+	n := uint32(body[0]) | uint32(body[1])<<8 | uint32(body[2])<<16 | uint32(body[3])<<24
+	return n > 0 && n <= 4096 && int(n)*4+4 == len(body)
 }

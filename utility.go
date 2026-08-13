@@ -12,7 +12,7 @@ const (
 	// A title asks for a NEX unique id the first time an account goes online, then keeps
 	// it locally — so these are only ever called on a FRESH account, which is why an
 	// unanswered one looks like "it works for most people". Splatoon 2 calls method 2 and
-	// shows 2306-0103 if it is not answered. Both were implemented in the previous stack and
+	// shows 2306-0103 if it is not answered. Both were implemented in the nex-go stack and
 	// lost when the games moved to this core.
 	MethodAcquireNexUniqueID             uint32 = 0x1
 	MethodAcquireNexUniqueIDWithPassword uint32 = 0x2
@@ -23,7 +23,7 @@ const (
 // The password only has to be stable and to match what we hand out: nothing verifies it
 // against a store, because the id IS the account's PID and the account is already
 // authenticated by its Kerberos ticket before any of this runs. Same constant as the
-// the previous stack, so an account that acquired its id there keeps working here.
+// nex-go stack, so an account that acquired its id there keeps working here.
 const nexUniqueIDPasswordSalt uint64 = 0x4e45585f50574421
 
 // UniqueIDInfo is the Utility structure returned by AcquireNexUniqueIDWithPassword:

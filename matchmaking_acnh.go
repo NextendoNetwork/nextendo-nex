@@ -17,7 +17,7 @@ package nex
 // qu'ils ont aujourd'hui.
 //
 // Formats fil repris de la documentation NintendoClients (MIT) présente dans le dépôt —
-// tools/switch-measured/NintendoClients/nintendo/nex/matchmaking.py — et d'elle seule.
+// tools/switch-capture/NintendoClients/nintendo/nex/matchmaking.py — et d'elle seule.
 
 import (
 	"fmt"
@@ -189,8 +189,8 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 			continue
 		}
 		r := *g.session
-		// La clé de session DOIT sortir dès la découverte. Le serveur the previous stack de référence la
-		// renvoie dans FindByParticipant (prouvé : measured nexgo_reference.bin, Find/51 = 481o
+		// La clé de session DOIT sortir dès la découverte. Le serveur nex-go de référence la
+		// renvoie dans FindByParticipant (prouvé : capture nexgo_reference.bin, Find/51 = 481o
 		// dont la clé de 32o ; scrubbée on tombe à 449o) et la Pia d'ACNH s'en sert pour amorcer
 		// la session P2P AVANT le JOIN — la mettre à nil laisse le visiteur avec une clé nulle,
 		// le handshake P2P n'aboutit pas et la visite cale sur « Getting ready to depart »
@@ -333,9 +333,9 @@ func (m *Matchmaking) applySessionPart(p *UpdateMatchmakeSessionParam) bool {
 
 // NOTE sur l'ouverture d'aéroport (readiness de l'hôte).
 //
-// La pile the previous stack d'origine devait ajouter un contournement ici : après CreateMatchmakeSession,
+// La pile nex-go d'origine devait ajouter un contournement ici : après CreateMatchmakeSession,
 // l'hôte d'ACNH attend ~10 s une notification confirmant que le rassemblement est vivant, et
-// the previous stack excluait délibérément l'appelant de cette notification. Sans elle,
+// nex-protocols-common-go excluait délibérément l'appelant de cette notification. Sans elle,
 // l'hôte concluait à une erreur de communication, appelait UnregisterGathering et se
 // déconnectait — porte fermée, aucun visiteur possible.
 //
