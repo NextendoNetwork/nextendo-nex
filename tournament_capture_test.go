@@ -22,14 +22,20 @@ const captureCreateReq = "" +
 	"000003010000090400040000000a020000000b04008ead8b0f01040000000000ff000000000100000020000000000000" +
 	"006009060000000000c0120000000019aa1f00000000101baa1f000000000000000000000000000000"
 
+func capturedTournamentPayload(t *testing.T) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(captureCreateReq)
+	if err != nil {
+		t.Fatalf("hex invalide : %v", err)
+	}
+	return b
+}
+
 // TestStampTournamentReproducesCapture : poser identifiant, propriétaire et code
 // doit produire exactement ce que Nintendo a renvoyé — hors les trois octets de
 // queue, un compteur que le client envoie à zéro et dont il ne dépend pas.
 func TestStampTournamentReproducesCapture(t *testing.T) {
-	req, err := hex.DecodeString(captureCreateReq)
-	if err != nil {
-		t.Fatalf("hex invalide : %v", err)
-	}
+	req := capturedTournamentPayload(t)
 
 	const (
 		id   = uint32(3854367)
@@ -63,6 +69,28 @@ func TestStampTournamentReproducesCapture(t *testing.T) {
 	}
 }
 
+// A later u32 value of 1 is also encoded as 01 00 00 00. The old "last empty
+// string" heuristic inserted the code there and produced a shifted MK8D blob.
+func TestStampTournamentIgnoresLaterEmptyPattern(t *testing.T) {
+	req := capturedTournamentPayload(t)
+	codeOffset := tournamentCodeOffset(req)
+	if codeOffset != 0xb5 {
+		t.Fatalf("code offset = %#x, want 0xb5", codeOffset)
+	}
+	req[0xd0], req[0xd1], req[0xd2], req[0xd3] = 1, 0, 0, 0
+
+	const code = "123456789012"
+	got := stampTournament(req, 4242, make([]byte, 8), code)
+	if !tournamentCodeMatches(got, code) {
+		t.Fatal("code was not written to its structural field")
+	}
+	// The later binary pattern must remain u32(1), not become a string. Writing
+	// the code at the correct field shifts this later value by 12 bytes.
+	if !bytes.Equal(got[0xd0+12:0xd4+12], []byte{1, 0, 0, 0}) {
+		t.Fatalf("later field was modified: %x", got[0xd0+12:0xd4+12])
+	}
+}
+
 // TestNewTournamentCode : douze chiffres, comme celui de Nintendo.
 func TestNewTournamentCode(t *testing.T) {
 	for i := 0; i < 50; i++ {
@@ -81,9 +109,7 @@ func TestNewTournamentCode(t *testing.T) {
 // TestTournamentLifecycle : créer, retrouver, inscrire.
 func TestTournamentLifecycle(t *testing.T) {
 	m := NewMatchmaking()
-	payload := make([]byte, 200)
-	// une chaîne vide en fin de structure, comme le fait le client pour le code
-	payload[150], payload[151], payload[152] = 1, 0, 0
+	payload := capturedTournamentPayload(t)
 
 	tr := m.CreateTournament(1800000006, payload)
 	if tr == nil {
@@ -111,8 +137,7 @@ func TestTournamentLifecycle(t *testing.T) {
 // sans ce contrôle, n'importe qui effacerait le tournoi d'un autre.
 func TestDeleteTournamentOwnerOnly(t *testing.T) {
 	m := NewMatchmaking()
-	payload := make([]byte, 200)
-	payload[150], payload[151], payload[152] = 1, 0, 0
+	payload := capturedTournamentPayload(t)
 
 	tr := m.CreateTournament(1800000006, payload)
 	if tr == nil {
@@ -132,5 +157,51 @@ func TestDeleteTournamentOwnerOnly(t *testing.T) {
 	}
 	if deleteTournament(tr.ID, 1800000006) {
 		t.Error("une seconde suppression devrait échouer")
+	}
+}
+
+func TestCreateTournamentRejectsInvalidPayloads(t *testing.T) {
+	m := NewMatchmaking()
+	badCode := capturedTournamentPayload(t)
+	badCode[tournamentCodeOffset(badCode)] = 2 // The creator must send an empty code.
+	oddName := capturedTournamentPayload(t)
+	oddName[tournamentNameLengthOffset] = 3
+	valid := capturedTournamentPayload(t)
+	oversized := append(valid, make([]byte, tournamentMaxBlob+1-len(valid))...)
+
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"empty", nil},
+		{"truncated", make([]byte, tournamentNameLengthOffset+1)},
+		{"odd name length", oddName},
+		{"non-empty or malformed code field", badCode},
+		{"oversized", oversized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tr := m.CreateTournament(1800000006, tc.payload); tr != nil {
+				t.Fatal("invalid tournament payload was stored")
+			}
+		})
+	}
+}
+
+func TestWriteTournamentListIsolatesInvalidEntry(t *testing.T) {
+	s := testSettings()
+	payload := capturedTournamentPayload(t)
+	valid := (&Matchmaking{}).CreateTournament(1800000006, payload)
+	if valid == nil {
+		t.Fatal("valid tournament was rejected")
+	}
+	bad := *valid
+	bad.Blob = append([]byte(nil), valid.Blob...)
+	bad.Blob[tournamentCodeOffset(bad.Blob)+2] = 'X'
+
+	body := writeTournamentList(s, []*Tournament{&bad, valid})
+	in := NewStreamIn(body, s)
+	if n := in.U32(); n != 1 {
+		t.Fatalf("list declares %d entries, want 1", n)
 	}
 }

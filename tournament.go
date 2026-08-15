@@ -25,7 +25,9 @@ package nex
 // fin que le client envoie à zéro et dont il ne dépend pas.
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -49,6 +51,11 @@ const (
 	// tournamentMax borne le nombre de tournois retenus. Nintendo en sert 85 ;
 	// au-delà de cette borne on cesse d'en créer plutôt que de croître sans fin.
 	tournamentMax = 2000
+	// tournamentNameLengthOffset is the u16 byte length of the UTF-16 name,
+	// including its terminator, in the captured MK8D structure.
+	tournamentNameLengthOffset = 0x69
+	// The code string follows 0x40 bytes of rules after the name.
+	tournamentCodeAfterName = 0x40
 )
 
 // Tournament est un tournoi tel qu'il circule : sa structure d'origine, plus ce
@@ -87,8 +94,10 @@ func tournamentInit() {
 			var list []*Tournament
 			if json.Unmarshal(b, &list) == nil {
 				tournaments.mu.Lock()
+				quarantined := 0
 				for _, t := range list {
-					if t == nil || t.ID == 0 || len(t.Blob) == 0 {
+					if !validStoredTournament(t) {
+						quarantined++
 						continue
 					}
 					tournaments.byID[t.ID] = t
@@ -99,6 +108,9 @@ func tournamentInit() {
 				n := len(tournaments.byID)
 				tournaments.mu.Unlock()
 				fmt.Printf("[Tournoi] %d tournoi(s) restauré(s) depuis %s\n", n, tournamentFile)
+				if quarantined != 0 {
+					fmt.Printf("[Tournament] quarantined %d invalid persisted tournament(s) (not served)\n", quarantined)
+				}
 			}
 		}
 		go tournamentFlusher()
@@ -140,17 +152,57 @@ func newTournamentCode() string {
 	return string(out)
 }
 
-// lastEmptyString rend l'offset de la DERNIÈRE chaîne vide de la structure —
-// c'est là que va le code. Une chaîne NEX vide s'écrit u16(1) puis un octet nul ;
-// la capture en compte dix, et le code occupe systématiquement la dernière.
-func lastEmptyString(b []byte) int {
-	pos := -1
-	for i := 0; i+3 <= len(b); i++ {
-		if b[i] == 1 && b[i+1] == 0 && b[i+2] == 0 {
-			pos = i
+// tournamentCodeOffset locates the code field from the encoded name length.
+// Searching for the last 01 00 00 sequence is unsafe: a later integer may have
+// the same bytes and cause the remainder of the blob to be shifted.
+func tournamentCodeOffset(b []byte) int {
+	if len(b) < tournamentNameLengthOffset+2 {
+		return -1
+	}
+	nameLen := int(binary.LittleEndian.Uint16(b[tournamentNameLengthOffset:]))
+	// MK8D encodes the name as a UTF-16 string terminated by U+0000.
+	if nameLen < 2 || nameLen&1 != 0 {
+		return -1
+	}
+	i := tournamentNameLengthOffset + 2 + nameLen + tournamentCodeAfterName
+	if i < 0 || i+3 > len(b) {
+		return -1
+	}
+	return i
+}
+
+func validTournamentCode(code string) bool {
+	if len(code) != tournamentCodeLen {
+		return false
+	}
+	for i := range code {
+		if code[i] < '0' || code[i] > '9' {
+			return false
 		}
 	}
-	return pos
+	return true
+}
+
+func tournamentCodeMatches(b []byte, code string) bool {
+	i := tournamentCodeOffset(b)
+	if i < 0 || !validTournamentCode(code) {
+		return false
+	}
+	n := int(binary.LittleEndian.Uint16(b[i:]))
+	if n != tournamentCodeLen+1 || i+2+n > len(b) || b[i+2+n-1] != 0 {
+		return false
+	}
+	return bytes.Equal(b[i+2:i+2+tournamentCodeLen], []byte(code))
+}
+
+func validStoredTournament(t *Tournament) bool {
+	if t == nil || t.ID == 0 || len(t.Blob) < 12 || len(t.Blob) > tournamentMaxBlob+tournamentCodeLen {
+		return false
+	}
+	if binary.LittleEndian.Uint32(t.Blob) != t.ID {
+		return false
+	}
+	return tournamentCodeMatches(t.Blob, t.Code)
 }
 
 // stampTournament pose l'identifiant, la marque du tournoi et le code dans la
@@ -171,8 +223,8 @@ func stampTournament(payload []byte, id uint32, mark []byte, code string) []byte
 	}
 	out[0], out[1], out[2], out[3] = byte(id), byte(id>>8), byte(id>>16), byte(id>>24)
 	copy(out[4:12], mark)
-	i := lastEmptyString(out)
-	if i < 0 || code == "" {
+	i := tournamentCodeOffset(out)
+	if i < 0 || !validTournamentCode(code) || !bytes.Equal(out[i:i+3], []byte{1, 0, 0}) {
 		return out
 	}
 	// La chaîne vide (3 octets) devient une chaîne de 12 chiffres + terminateur.
@@ -193,7 +245,8 @@ func stampTournament(payload []byte, id uint32, mark []byte, code string) []byte
 // complétée. Exporté pour qu'un serveur de jeu puisse l'alimenter autrement.
 func (m *Matchmaking) CreateTournament(owner uint64, payload []byte) *Tournament {
 	tournamentInit()
-	if len(payload) == 0 || len(payload) > tournamentMaxBlob {
+	i := tournamentCodeOffset(payload)
+	if len(payload) == 0 || len(payload) > tournamentMaxBlob || i < 0 || !bytes.Equal(payload[i:i+3], []byte{1, 0, 0}) {
 		return nil
 	}
 	tournaments.mu.Lock()
@@ -210,6 +263,10 @@ func (m *Matchmaking) CreateTournament(owner uint64, payload []byte) *Tournament
 		Participants: []uint64{owner}, CreatedAt: time.Now().Unix(),
 	}
 	t.Blob = stampTournament(payload, id, mark, t.Code)
+	if !validStoredTournament(t) {
+		tournaments.mu.Unlock()
+		return nil
+	}
 	tournaments.byID[id] = t
 	tournaments.mu.Unlock()
 	tournamentDirty.Store(true)
@@ -221,7 +278,11 @@ func tournamentByID(id uint32) *Tournament {
 	tournamentInit()
 	tournaments.mu.RLock()
 	defer tournaments.mu.RUnlock()
-	return tournaments.byID[id]
+	t := tournaments.byID[id]
+	if !validStoredTournament(t) {
+		return nil
+	}
+	return t
 }
 
 func allTournaments() []*Tournament {
@@ -230,7 +291,9 @@ func allTournaments() []*Tournament {
 	defer tournaments.mu.RUnlock()
 	out := make([]*Tournament, 0, len(tournaments.byID))
 	for _, t := range tournaments.byID {
-		out = append(out, t)
+		if validStoredTournament(t) {
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -283,8 +346,14 @@ func (m *Matchmaking) createTournament(conn *Connection, req *RMCMessage) *RMCMe
 // entrée u8 version, u32 longueur, contenu. Forme relevée sur la capture.
 func writeTournamentList(s *Settings, list []*Tournament) []byte {
 	out := NewStreamOut(s)
-	out.U32(uint32(len(list)))
+	valid := make([]*Tournament, 0, len(list))
 	for _, t := range list {
+		if validStoredTournament(t) {
+			valid = append(valid, t)
+		}
+	}
+	out.U32(uint32(len(valid)))
+	for _, t := range valid {
 		out.U8(1)
 		out.U32(uint32(len(t.Blob)))
 		out.Write(t.Blob)
