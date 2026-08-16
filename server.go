@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/lxzan/gws"
@@ -72,17 +73,22 @@ func (s *Server) mux() *http.ServeMux {
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && s.CustomHTTPHandler != nil {
+		if strings.ToLower(r.Header.Get("Upgrade")) == "websocket" || r.Header.Get("Sec-WebSocket-Key") != "" {
+			socket, err := upgrader.Upgrade(w, r)
+			if err != nil {
+				fmt.Printf("[WS] upgrade failed from %s path=%q proto=%q: %v\n",
+					r.RemoteAddr, r.URL.Path, r.Header.Get("Sec-WebSocket-Protocol"), err)
+				return
+			}
+			go socket.ReadLoop()
+			return
+		}
+
+		if s.CustomHTTPHandler != nil {
 			s.CustomHTTPHandler(w, r)
 			return
 		}
-		socket, err := upgrader.Upgrade(w, r)
-		if err != nil {
-			fmt.Printf("[WS] upgrade failed from %s path=%q proto=%q: %v\n",
-				r.RemoteAddr, r.URL.Path, r.Header.Get("Sec-WebSocket-Protocol"), err)
-			return
-		}
-		go socket.ReadLoop()
+		http.NotFound(w, r)
 	})
 	return mux
 }
@@ -92,7 +98,7 @@ func (s *Server) mux() *http.ServeMux {
 // NEX needs the HTTP/1.1 Upgrade handshake.
 func (s *Server) ListenSecure(port int, certFile, keyFile string) error {
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
+		Addr:         fmt.Sprintf("0.0.0.0:%d", port),
 		Handler:      s.mux(),
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
@@ -101,5 +107,5 @@ func (s *Server) ListenSecure(port int, certFile, keyFile string) error {
 
 // ListenInsecure serves the endpoint over plain WebSocket (no TLS) — local test.
 func (s *Server) ListenInsecure(port int) error {
-	return http.ListenAndServe(fmt.Sprintf(":%d", port), s.mux())
+	return http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", port), s.mux())
 }

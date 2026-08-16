@@ -7,8 +7,8 @@ package nex
 // 12 chiffres pour les partager. La capture du serveur de Nintendo en montre 85
 // en même temps : « Mario vs Luigi », « Hide & Seek », « 200CC TOURNAMENT ».
 //
-// LE PRINCIPE, ET IL EST SIMPLE : on ne décode PAS la structure. Le créateur
-// envoie 233 octets décrivant tout son tournoi ; le serveur n'y touche qu'à
+// LE PRINCIPE, ET IL EST SIMPLE : on ne décode PAS la structure entière. Le créateur
+// envoie une structure décrivant tout son tournoi ; le serveur n'y touche qu'à
 // trois endroits et rend le reste verbatim :
 //
 //	+0x00  identifiant   0 à l'envoi        -> attribué par le serveur
@@ -16,18 +16,17 @@ package nex
 //	                                          voir stampTournament)
 //	 …     code          chaîne VIDE        -> 12 chiffres générés
 //
-// Le reste — 169 octets de règles, le nom, les équipes — nous est opaque et le
-// restera : c'est la même leçon que la présence de Luigi's Mansion, où vouloir
-// interpréter les champs faisait perdre du temps quand les rediffuser suffisait.
-//
-// Vérifié : appliquer cette transformation à la requête capturée reproduit la
-// réponse de Nintendo à 242 octets sur 245. Les 3 restants sont un compteur de
-// fin que le client envoie à zéro et dont il ne dépend pas.
+// Le reste — règles, le nom, les équipes — nous est opaque et le
+// restera : on localise structurellement le champ du code en parcourant le nom
+// UTF-16 et la liste de propriétés de règles jusqu'au terminateur 0xFF.
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -49,6 +48,9 @@ const (
 	// tournamentMax borne le nombre de tournois retenus. Nintendo en sert 85 ;
 	// au-delà de cette borne on cesse d'en créer plutôt que de croître sans fin.
 	tournamentMax = 2000
+	// tournamentNameLengthOffset is the u16 byte length of the UTF-16 name,
+	// including its terminator, in the captured MK8D structure.
+	tournamentNameLengthOffset = 0x69
 )
 
 // Tournament est un tournoi tel qu'il circule : sa structure d'origine, plus ce
@@ -64,13 +66,14 @@ type Tournament struct {
 }
 
 type tournamentStore struct {
-	mu     sync.RWMutex
-	byID   map[uint32]*Tournament
-	nextID uint32
+	mu          sync.RWMutex
+	byID        map[uint32]*Tournament
+	quarantined []*Tournament
+	nextID      uint32
 }
 
 var (
-	tournaments     = &tournamentStore{byID: map[uint32]*Tournament{}, nextID: 1000}
+	tournaments     = &tournamentStore{byID: map[uint32]*Tournament{}, quarantined: []*Tournament{}, nextID: 1000}
 	tournamentFile  = os.Getenv("NEXTENDO_TOURNAMENT_FILE")
 	tournamentOnce  sync.Once
 	tournamentDirty atomic.Bool
@@ -87,18 +90,28 @@ func tournamentInit() {
 			var list []*Tournament
 			if json.Unmarshal(b, &list) == nil {
 				tournaments.mu.Lock()
+				quarantinedCount := 0
 				for _, t := range list {
-					if t == nil || t.ID == 0 || len(t.Blob) == 0 {
+					if t == nil || t.ID == 0 {
 						continue
 					}
-					tournaments.byID[t.ID] = t
+					// Advance nextID for every recorded tournament to prevent duplicate ID reuse
 					if t.ID >= tournaments.nextID {
 						tournaments.nextID = t.ID + 1
 					}
+					if !validStoredTournament(t) {
+						tournaments.quarantined = append(tournaments.quarantined, t)
+						quarantinedCount++
+						continue
+					}
+					tournaments.byID[t.ID] = t
 				}
 				n := len(tournaments.byID)
 				tournaments.mu.Unlock()
 				fmt.Printf("[Tournoi] %d tournoi(s) restauré(s) depuis %s\n", n, tournamentFile)
+				if quarantinedCount != 0 {
+					fmt.Printf("[Tournoi] %d tournoi(s) invalide(s) mis en quarantaine (conservés sans être diffusés)\n", quarantinedCount)
+				}
 			}
 		}
 		go tournamentFlusher()
@@ -113,7 +126,9 @@ func tournamentFlusher() {
 			continue
 		}
 		tournaments.mu.RLock()
-		list := make([]*Tournament, 0, len(tournaments.byID))
+		list := make([]*Tournament, 0, len(tournaments.byID)+len(tournaments.quarantined))
+		// Preserve quarantined entries so they are not wiped from disk
+		list = append(list, tournaments.quarantined...)
 		for _, v := range tournaments.byID {
 			list = append(list, v)
 		}
@@ -140,29 +155,96 @@ func newTournamentCode() string {
 	return string(out)
 }
 
-// lastEmptyString rend l'offset de la DERNIÈRE chaîne vide de la structure —
-// c'est là que va le code. Une chaîne NEX vide s'écrit u16(1) puis un octet nul ;
-// la capture en compte dix, et le code occupe systématiquement la dernière.
-func lastEmptyString(b []byte) int {
-	pos := -1
-	for i := 0; i+3 <= len(b); i++ {
-		if b[i] == 1 && b[i+1] == 0 && b[i+2] == 0 {
-			pos = i
+// tournamentCodeOffset locates the code field by walking the UTF-16 name length
+// and the variable-length rule property list until its 0xFF terminator.
+func tournamentCodeOffset(b []byte) int {
+	if len(b) < tournamentNameLengthOffset+2 {
+		return -1
+	}
+	nameLen := int(binary.LittleEndian.Uint16(b[tournamentNameLengthOffset:]))
+	// MK8D encodes the name as a UTF-16 string terminated by U+0000.
+	if nameLen < 2 || nameLen&1 != 0 {
+		return -1
+	}
+	pos := tournamentNameLengthOffset + 2 + nameLen
+	if pos >= len(b) {
+		return -1
+	}
+
+	// Walk property list until 0xFF terminator
+	for pos < len(b) {
+		idByte := b[pos]
+		if idByte == 0xff {
+			// Terminator entry (0xFF 0x00 0x00 0x00 0x00)
+			codeOffset := pos + 5
+			if codeOffset+3 <= len(b) {
+				return codeOffset
+			}
+			return -1
+		}
+		if pos+2 > len(b) {
+			return -1
+		}
+		typeByte := b[pos+1]
+		switch typeByte {
+		case 0x01:
+			pos += 4
+		case 0x02:
+			pos += 5
+		case 0x04:
+			pos += 7
+		default:
+			// Type de propriete inconnu. On NE retombe PAS sur l'ancien scan
+			// "01 00 00" : c'est exactement l'heuristique ambigue que ce correctif
+			// remplace (un entier ultérieur peut contenir ce motif, ce qui decalait
+			// le code et faisait planter le client Pia). Mieux vaut echouer et le
+			// signaler que deviner et corrompre la structure.
+			log.Printf("[tournament] type de propriete inconnu 0x%02x a l'offset %d — offset du code non resolu", typeByte, pos)
+			return -1
 		}
 	}
-	return pos
+	return -1
+}
+
+func validTournamentCode(code string) bool {
+	if len(code) != tournamentCodeLen {
+		return false
+	}
+	for i := range code {
+		if code[i] < '0' || code[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func tournamentCodeMatches(b []byte, code string) bool {
+	i := tournamentCodeOffset(b)
+	if i < 0 || !validTournamentCode(code) {
+		return false
+	}
+	if i+2 > len(b) {
+		return false
+	}
+	n := int(binary.LittleEndian.Uint16(b[i:]))
+	if n != tournamentCodeLen+1 || i+2+n > len(b) || b[i+2+n-1] != 0 {
+		return false
+	}
+	return bytes.Equal(b[i+2:i+2+tournamentCodeLen], []byte(code))
+}
+
+func validStoredTournament(t *Tournament) bool {
+	if t == nil || t.ID == 0 || len(t.Blob) < 12 || len(t.Blob) > tournamentMaxBlob+tournamentCodeLen {
+		return false
+	}
+	if binary.LittleEndian.Uint32(t.Blob) != t.ID {
+		return false
+	}
+	return tournamentCodeMatches(t.Blob, t.Code)
 }
 
 // stampTournament pose l'identifiant, la marque du tournoi et le code dans la
 // structure envoyée par le créateur, et rend la structure complétée.
-//
-// ⚠️ LES 8 OCTETS EN +0x04 NE SONT PAS LE PROPRIÉTAIRE. On y écrivait d'abord le
-// PID du créateur, par analogie ; c'est faux, et vérifié : sur la capture, la
-// valeur rendue par Nintendo (4ec9eb25f0fa43ef) ne figure dans AUCUN des PID que
-// le joueur connaît, à commencer par le sien. C'est une marque propre au
-// tournoi, tirée au sort à sa création. On reproduit donc cette forme, et le
-// vrai propriétaire n'est retenu que de NOTRE côté, pour la permission de
-// suppression.
 func stampTournament(payload []byte, id uint32, mark []byte, code string) []byte {
 	out := make([]byte, len(payload))
 	copy(out, payload)
@@ -171,8 +253,8 @@ func stampTournament(payload []byte, id uint32, mark []byte, code string) []byte
 	}
 	out[0], out[1], out[2], out[3] = byte(id), byte(id>>8), byte(id>>16), byte(id>>24)
 	copy(out[4:12], mark)
-	i := lastEmptyString(out)
-	if i < 0 || code == "" {
+	i := tournamentCodeOffset(out)
+	if i < 0 || !validTournamentCode(code) || !bytes.Equal(out[i:i+3], []byte{1, 0, 0}) {
 		return out
 	}
 	// La chaîne vide (3 octets) devient une chaîne de 12 chiffres + terminateur.
@@ -193,7 +275,8 @@ func stampTournament(payload []byte, id uint32, mark []byte, code string) []byte
 // complétée. Exporté pour qu'un serveur de jeu puisse l'alimenter autrement.
 func (m *Matchmaking) CreateTournament(owner uint64, payload []byte) *Tournament {
 	tournamentInit()
-	if len(payload) == 0 || len(payload) > tournamentMaxBlob {
+	i := tournamentCodeOffset(payload)
+	if len(payload) == 0 || len(payload) > tournamentMaxBlob || i < 0 || !bytes.Equal(payload[i:i+3], []byte{1, 0, 0}) {
 		return nil
 	}
 	tournaments.mu.Lock()
@@ -210,6 +293,10 @@ func (m *Matchmaking) CreateTournament(owner uint64, payload []byte) *Tournament
 		Participants: []uint64{owner}, CreatedAt: time.Now().Unix(),
 	}
 	t.Blob = stampTournament(payload, id, mark, t.Code)
+	if !validStoredTournament(t) {
+		tournaments.mu.Unlock()
+		return nil
+	}
 	tournaments.byID[id] = t
 	tournaments.mu.Unlock()
 	tournamentDirty.Store(true)
@@ -221,7 +308,11 @@ func tournamentByID(id uint32) *Tournament {
 	tournamentInit()
 	tournaments.mu.RLock()
 	defer tournaments.mu.RUnlock()
-	return tournaments.byID[id]
+	t := tournaments.byID[id]
+	if !validStoredTournament(t) {
+		return nil
+	}
+	return t
 }
 
 func allTournaments() []*Tournament {
@@ -230,7 +321,9 @@ func allTournaments() []*Tournament {
 	defer tournaments.mu.RUnlock()
 	out := make([]*Tournament, 0, len(tournaments.byID))
 	for _, t := range tournaments.byID {
-		out = append(out, t)
+		if validStoredTournament(t) {
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -241,7 +334,7 @@ func joinTournament(id uint32, pid uint64) bool {
 	tournaments.mu.Lock()
 	defer tournaments.mu.Unlock()
 	t := tournaments.byID[id]
-	if t == nil {
+	if t == nil || !validStoredTournament(t) {
 		return false
 	}
 	for _, p := range t.Participants {
@@ -283,8 +376,14 @@ func (m *Matchmaking) createTournament(conn *Connection, req *RMCMessage) *RMCMe
 // entrée u8 version, u32 longueur, contenu. Forme relevée sur la capture.
 func writeTournamentList(s *Settings, list []*Tournament) []byte {
 	out := NewStreamOut(s)
-	out.U32(uint32(len(list)))
+	valid := make([]*Tournament, 0, len(list))
 	for _, t := range list {
+		if validStoredTournament(t) {
+			valid = append(valid, t)
+		}
+	}
+	out.U32(uint32(len(valid)))
+	for _, t := range valid {
 		out.U8(1)
 		out.U32(uint32(len(t.Blob)))
 		out.Write(t.Blob)
@@ -326,7 +425,7 @@ func deleteTournament(id uint32, pid uint64) bool {
 	tournaments.mu.Lock()
 	defer tournaments.mu.Unlock()
 	t := tournaments.byID[id]
-	if t == nil || t.Owner != pid {
+	if t == nil || !validStoredTournament(t) || t.Owner != pid {
 		return false
 	}
 	delete(tournaments.byID, id)

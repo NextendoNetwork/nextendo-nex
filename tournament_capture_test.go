@@ -2,6 +2,7 @@ package nex
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 )
@@ -10,11 +11,6 @@ import (
 // Deluxe, capture du 2026-08-12). Le joueur crée un tournoi nommé « test » ; le
 // client envoie la structure avec identifiant, propriétaire et code vides, et le
 // serveur la rend complétée.
-//
-// Ces octets sont la seule référence dont on dispose : si notre transformation
-// dérive, ce test tombe.
-
-// requête réelle du client (sans l'en-tête version+longueur)
 const captureCreateReq = "" +
 	"000000000000000000000000140000000200000003000000010000000100000001000000020000000100000001000000" +
 	"010000000100000001000000ffffffffffffffff00000000000000000000000000000000000000000000000000000000" +
@@ -22,48 +18,95 @@ const captureCreateReq = "" +
 	"000003010000090400040000000a020000000b04008ead8b0f01040000000000ff000000000100000020000000000000" +
 	"006009060000000000c0120000000019aa1f00000000101baa1f000000000000000000000000000000"
 
-// TestStampTournamentReproducesCapture : poser identifiant, propriétaire et code
-// doit produire exactement ce que Nintendo a renvoyé — hors les trois octets de
-// queue, un compteur que le client envoie à zéro et dont il ne dépend pas.
-func TestStampTournamentReproducesCapture(t *testing.T) {
-	req, err := hex.DecodeString(captureCreateReq)
+func capturedTournamentPayload(t *testing.T) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(captureCreateReq)
 	if err != nil {
 		t.Fatalf("hex invalide : %v", err)
 	}
+	return b
+}
+
+// TestStampTournamentReproducesCapture : poser identifiant, marque et code
+// doit reproduire exactement la capture de Nintendo.
+func TestStampTournamentReproducesCapture(t *testing.T) {
+	req := capturedTournamentPayload(t)
 
 	const (
 		id   = uint32(3854367)
 		code = "096942834219"
 	)
-	// Les 8 octets en +0x04 sont une marque propre au tournoi, PAS le PID du
-	// créateur : celle rendue par Nintendo ne figure dans aucun PID connu du
-	// joueur. On rejoue donc la sienne telle quelle.
 	mark := []byte{0x4e, 0xc9, 0xeb, 0x25, 0xf0, 0xfa, 0x43, 0xef}
 	got := stampTournament(req, id, mark, code)
 
-	// La réponse fait 12 octets de plus que la requête : la chaîne de code vide
-	// (3 octets) devient 12 chiffres plus terminateur (15 octets).
 	if len(got) != len(req)+12 {
 		t.Fatalf("longueur %d, attendu %d", len(got), len(req)+12)
 	}
-	// Identifiant et propriétaire posés en tête.
-	if u := uint32(got[0]) | uint32(got[1])<<8 | uint32(got[2])<<16 | uint32(got[3])<<24; u != id {
+	if u := binary.LittleEndian.Uint32(got[:4]); u != id {
 		t.Errorf("identifiant = %d, attendu %d", u, id)
 	}
 	if !bytes.Equal(got[4:12], mark) {
 		t.Errorf("marque = %x, attendu %x", got[4:12], mark)
 	}
-	// Le code doit être présent, précédé de sa longueur (12 + terminateur).
 	if !bytes.Contains(got, append([]byte{13, 0}, append([]byte(code), 0)...)) {
 		t.Error("le code n'a pas été posé au bon format")
 	}
-	// Tout ce qui précède l'identifiant de code doit être intact.
 	if !bytes.Equal(got[12:0xb5], req[12:0xb5]) {
 		t.Error("les règles, le nom et les équipes ont été altérés")
 	}
 }
 
-// TestNewTournamentCode : douze chiffres, comme celui de Nintendo.
+func TestStampTournamentIgnoresLaterEmptyPattern(t *testing.T) {
+	req := capturedTournamentPayload(t)
+	codeOffset := tournamentCodeOffset(req)
+	if codeOffset != 0xb5 {
+		t.Fatalf("code offset = %#x, want 0xb5", codeOffset)
+	}
+	req[0xd0], req[0xd1], req[0xd2], req[0xd3] = 1, 0, 0, 0
+
+	const code = "123456789012"
+	got := stampTournament(req, 4242, make([]byte, 8), code)
+	if !tournamentCodeMatches(got, code) {
+		t.Fatal("code was not written to its structural field")
+	}
+	if !bytes.Equal(got[0xd0+12:0xd4+12], []byte{1, 0, 0, 0}) {
+		t.Fatalf("later field was modified: %x", got[0xd0+12:0xd4+12])
+	}
+}
+
+// TestTournamentVariableLengthName : teste un nom de longueur variable (ex: 20 caractères au lieu de 4)
+func TestTournamentVariableLengthName(t *testing.T) {
+	req := capturedTournamentPayload(t)
+	// Remplacer le nom "test" (10 octets utf16) par "Mario Grand Prix 2026" (44 octets utf16)
+	longName := "Mario Grand Prix 2026\x00"
+	var longNameUTF16 []byte
+	for _, r := range longName {
+		longNameUTF16 = append(longNameUTF16, byte(r), 0)
+	}
+	newLen := len(longNameUTF16)
+
+	// Reconstruire le payload avec le nouveau nom
+	var custom []byte
+	custom = append(custom, req[:0x69]...)
+	lenBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(lenBytes, uint16(newLen))
+	custom = append(custom, lenBytes...)
+	custom = append(custom, longNameUTF16...)
+	custom = append(custom, req[0x75:]...) // Règles et reste
+
+	expectedOffset := 0x69 + 2 + newLen + (0xb5 - 0x75)
+	computedOffset := tournamentCodeOffset(custom)
+	if computedOffset != expectedOffset {
+		t.Fatalf("code offset for long name = %#x, want %#x", computedOffset, expectedOffset)
+	}
+
+	const code = "987654321098"
+	got := stampTournament(custom, 5555, make([]byte, 8), code)
+	if !tournamentCodeMatches(got, code) {
+		t.Fatal("code match failed for variable length name")
+	}
+}
+
 func TestNewTournamentCode(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		c := newTournamentCode()
@@ -78,12 +121,9 @@ func TestNewTournamentCode(t *testing.T) {
 	}
 }
 
-// TestTournamentLifecycle : créer, retrouver, inscrire.
 func TestTournamentLifecycle(t *testing.T) {
 	m := NewMatchmaking()
-	payload := make([]byte, 200)
-	// une chaîne vide en fin de structure, comme le fait le client pour le code
-	payload[150], payload[151], payload[152] = 1, 0, 0
+	payload := capturedTournamentPayload(t)
 
 	tr := m.CreateTournament(1800000006, payload)
 	if tr == nil {
@@ -106,13 +146,9 @@ func TestTournamentLifecycle(t *testing.T) {
 	}
 }
 
-// TestDeleteTournamentOwnerOnly : un tournoi ne peut être supprimé que par son
-// propriétaire. Les identifiants sont des entiers croissants, donc devinables :
-// sans ce contrôle, n'importe qui effacerait le tournoi d'un autre.
 func TestDeleteTournamentOwnerOnly(t *testing.T) {
 	m := NewMatchmaking()
-	payload := make([]byte, 200)
-	payload[150], payload[151], payload[152] = 1, 0, 0
+	payload := capturedTournamentPayload(t)
 
 	tr := m.CreateTournament(1800000006, payload)
 	if tr == nil {
