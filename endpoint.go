@@ -260,6 +260,18 @@ type Connection struct {
 	pending   map[uint16][]byte
 	pendingMu sync.Mutex
 
+	// lastDispatchedSeq / hasDispatched dedupe reliable DATA packets. The console's own
+	// PRUDP layer retransmits a request it hasn't seen an ack for in time, resending the
+	// SAME packet id as a fresh WebSocket frame — so "WebSocket delivers in order, no
+	// duplicates" does not save us here, the duplication happens one layer up. Without
+	// this, a retransmit under latency gets dispatched to the RMC handler TWICE (e.g. two
+	// createSession calls from one "Create Lobby" press, two different gatherings, two
+	// different responses to what the client tracks as one call) — the client's own state
+	// machine doesn't expect a second answer to an already-answered call and surfaces a
+	// communication error. The ack is still sent every time; only the dispatch is skipped.
+	lastDispatchedSeq uint16
+	hasDispatched     bool
+
 	state int
 	mu    sync.Mutex
 
@@ -556,6 +568,14 @@ func (c *Connection) processData(p *Packet) {
 	if p.FragmentID == 0 {
 		full := c.fragBuf
 		c.fragBuf = nil
+		// A retransmission of the last complete packet we already dispatched: the ack
+		// above covers it (the console just needed that resent), but dispatching it a
+		// second time would re-run the RMC call. See lastDispatchedSeq's comment.
+		if c.hasDispatched && p.PacketID == c.lastDispatchedSeq {
+			return
+		}
+		c.lastDispatchedSeq = p.PacketID
+		c.hasDispatched = true
 		c.dispatchRMC(full)
 	}
 }
