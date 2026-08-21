@@ -231,6 +231,7 @@ func uploadCommonData(conn *Connection, req *RMCMessage) *RMCMessage {
 	blob := in.Buffer()
 	if in.Err() == nil {
 		PutCommonData(conn.PID, blob)
+		logCommonDataNames(conn.PID, blob)
 	}
 	return NewRMCSuccess(conn.Settings, ProtocolRanking, req.Method, req.CallID, nil)
 }
