@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func testSettings() *Settings { return NewSwitchSettings("09c1c475", 40000) }
+func testSettings() *Settings { return NewSwitchSettings("testkey0", 40000) }
 
 // TestStringEncoding checks the NEX String layout: u16 length INCLUDING the null
 // terminator, then the UTF-8 bytes and a trailing 0x00.

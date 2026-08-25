@@ -7,7 +7,7 @@ import "testing"
 // requête ; ce test fige cette frontière, parce qu'une confusion ici renvoie au
 // jeu un nombre d'entrées qui n'existent pas.
 func TestIsTournamentIDList(t *testing.T) {
-	// Requête réelle de Mario Kart, relevée sur la capture : 85 identifiants,
+	// Requête réelle de Mario Kart, relevée sur la measured : 85 identifiants,
 	// donc 4 + 85×4 = 344 octets.
 	mk8 := make([]byte, 4+85*4)
 	mk8[0] = 85

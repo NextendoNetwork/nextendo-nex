@@ -74,8 +74,8 @@ func natAck(conn *Connection, req *RMCMessage) *RMCMessage {
 // relaySignatureKey answers GetRelaySignatureKey — the relay handshake the NEWER Pia (Mario
 // Strikers, with its RelayMesh stack) performs before starting the match, which MK8/S2/SSBU's older
 // direct-mesh Pia never calls. NOT a relay server: we advertise NO relay (empty address, port 0) —
-// exactly what Pretendo's server returns — so the game gets a well-formed "no relay offered" and
-// proceeds on its DIRECT mesh (which the packet capture proved works bidirectionally). Left
+// exactly what the previous stack's server returns — so the game gets a well-formed "no relay offered" and
+// proceeds on its DIRECT mesh (which the packet measured proved works bidirectionally). Left
 // unhandled it fell through to a malformed empty-list the game cannot parse -> its match-start
 // handshake never completes -> the match connects but never renders (the black screen). Response
 // layout: [relayMode i32][currentUTCTime DateTime][relay address String][port u16][addressType i32]
@@ -148,10 +148,26 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: cible RVCID=%d INTROUVABLE — pas d'InitiateProbe\n", conn.PID, rvcid)
 			continue
 		}
+		// Relais par paire : la station poussee a CETTE cible doit designer le port de
+		// la paire (appelant, cible). C est per-cible et non global — chaque pair d un
+		// salon a son propre port — donc la substitution vit ici, dans la boucle.
+		station := stationToProbe
+		corps := probeBody
+		if PairRelayActive() {
+			if rHost, rPort, ok := PairRelayFor(conn.PID, target.PID, PublicIPOf(conn), PublicIPOf(target)); ok {
+				u := ParseStationURL(station)
+				u.Set("address", rHost)
+				u.SetInt("port", rPort)
+				station = u.String()
+				out := NewStreamOut(s)
+				out.StationURL(u)
+				corps = out.Bytes()
+			}
+		}
 		// Server-initiated requests use a distinct call-id space.
 		fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d -> InitiateProbe VERS pid=%d (id=%d rvcid=%d) station=%q\n",
-			conn.PID, target.PID, target.ID, rvcid, stationToProbe)
-		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, probeBody))
+			conn.PID, target.PID, target.ID, rvcid, station)
+		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps))
 	}
 }
 

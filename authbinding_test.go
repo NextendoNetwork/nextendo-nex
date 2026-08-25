@@ -18,8 +18,8 @@ func buildIDToken(nnex string) string {
 	header := b64(map[string]any{"alg": "RS256", "kid": "nextendo-baas-key-1", "typ": "id_token"})
 	claims := map[string]any{
 		"sub": "0123456789abcdef0123456789abcdef",
-		"iss": "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com",
-		"aud": "ed9e2f05d286f7b8",
+		"iss": "https://example.invalid/baas",
+		"aud": "0000000000000000",
 		"hm":  true,
 	}
 	if nnex != "" {
@@ -33,7 +33,7 @@ func buildIDToken(nnex string) string {
 // "AuthenticationInfo" DataHolder whose Token field is a NEX String, surrounded by
 // the structure header and the other AuthenticationInfo fields.
 func wrapAsExtraData(jwt string) []byte {
-	settings := NewSwitchSettings("09c1c475", 40000)
+	settings := NewSwitchSettings("testkey0", 40000)
 	s := NewStreamOut(settings)
 	s.String("AuthenticationInfo") // DataHolder name
 	body := NewStreamOut(settings)

@@ -10,7 +10,7 @@ import (
 // NintendoClients (MIT), et vérifient que chaque structure se relit elle-même à l'identique.
 
 func acnhSettings() *Settings {
-	s := NewSwitchSettings("v43a10em", 40000)
+	s := NewSwitchSettings("testkey0", 40000)
 	return s
 }
 
@@ -59,7 +59,7 @@ func TestSearchCriteriaRoundTrip(t *testing.T) {
 func TestFindByParticipantParamRoundTrip(t *testing.T) {
 	s := acnhSettings()
 	want := &FindMatchmakeSessionByParticipantParam{
-		PrincipalIDs: []uint64{1800001659, 1800001660},
+		PrincipalIDs: []uint64{1001, 1002},
 		Options:      7,
 		BlockList:    MatchmakeBlockListParam{Options: 3},
 	}
@@ -70,7 +70,7 @@ func TestFindByParticipantParamRoundTrip(t *testing.T) {
 	var got FindMatchmakeSessionByParticipantParam
 	NewStreamIn(out.Bytes(), s).Extract(&got)
 
-	if len(got.PrincipalIDs) != 2 || got.PrincipalIDs[0] != 1800001659 || got.PrincipalIDs[1] != 1800001660 {
+	if len(got.PrincipalIDs) != 2 || got.PrincipalIDs[0] != 1001 || got.PrincipalIDs[1] != 1002 {
 		t.Fatalf("PrincipalIDs : got %v", got.PrincipalIDs)
 	}
 	if got.Options != want.Options {
@@ -88,9 +88,9 @@ func TestFindByParticipantResultCarriesPIDFirst(t *testing.T) {
 	s := acnhSettings()
 	sess := MatchmakeSession{GameMode: 4, OpenParticipation: true, Codeword: "ZZ999"}
 	sess.ID = 77
-	sess.OwnerPID = 1800001659
+	sess.OwnerPID = 1001
 
-	want := &FindMatchmakeSessionByParticipantResult{PrincipalID: 1800001659, Session: sess}
+	want := &FindMatchmakeSessionByParticipantResult{PrincipalID: 1001, Session: sess}
 	out := NewStreamOut(s)
 	out.Add(want)
 
@@ -100,7 +100,7 @@ func TestFindByParticipantResultCarriesPIDFirst(t *testing.T) {
 	if got.PrincipalID != want.PrincipalID {
 		t.Fatalf("PrincipalID : got %d, want %d", got.PrincipalID, want.PrincipalID)
 	}
-	if got.Session.ID != 77 || got.Session.OwnerPID != 1800001659 {
+	if got.Session.ID != 77 || got.Session.OwnerPID != 1001 {
 		t.Fatalf("session décalée : gid=%d owner=%d", got.Session.ID, got.Session.OwnerPID)
 	}
 	if got.Session.Codeword != "ZZ999" {
@@ -114,7 +114,7 @@ func TestFindByParticipantFindsHostSession(t *testing.T) {
 	m := NewMatchmaking()
 	m.FindByParticipantEnabled = true
 
-	host := uint64(1800001659)
+	host := uint64(1001)
 	sess := &MatchmakeSession{GameMode: 1, OpenParticipation: true}
 	sess.OwnerPID = host
 	m.gatherings[1] = &gathering{session: sess, participants: []uint64{host}}
@@ -123,7 +123,7 @@ func TestFindByParticipantFindsHostSession(t *testing.T) {
 	if g := m.sessionOfParticipant(host); g == nil {
 		t.Fatal("la session de l'hôte est introuvable : la visite d'ami renverrait « aucune île »")
 	}
-	if g := m.sessionOfParticipant(1800009999); g != nil {
+	if g := m.sessionOfParticipant(9999); g != nil {
 		t.Fatal("un joueur sans session ne doit correspondre à aucun rassemblement")
 	}
 }
@@ -143,8 +143,8 @@ func TestSessionPartPersistsCodeword(t *testing.T) {
 
 	sess := &MatchmakeSession{OpenParticipation: true}
 	sess.ID = 5
-	sess.OwnerPID = 1800001659
-	m.gatherings[5] = &gathering{session: sess, participants: []uint64{1800001659}}
+	sess.OwnerPID = 1001
+	m.gatherings[5] = &gathering{session: sess, participants: []uint64{1001}}
 
 	// Un vrai Dodo Code arrive avec flags 0x4002 (OpenParticipation | Codeword).
 	if !m.applySessionPart(&UpdateMatchmakeSessionParam{GID: 5, ModificationFlags: 0x4002, Codeword: "DODO1", OpenParticipation: true}) {

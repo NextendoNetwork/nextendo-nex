@@ -6,16 +6,16 @@ import (
 	"time"
 )
 
-// Dépôt de fin de course réel, relevé sur le serveur de Nintendo (capture du
+// Dépôt de fin de course réel, relevé sur le serveur de Nintendo (measured du
 // 2026-08-12 : un joueur court un tournoi jusqu'au bout). Tournoi 861706,
-// catégorie 393, score 10, profil d'un joueur (pseudonymise).
+// catégorie 393, score 10, profil « Moha » / « Kazu '-' ».
 const captureScoreSubmit = "" +
 	"009c0000000a260d008901000001000000" +
 	"0a000000ff000000000184005246" +
 	"0000c08a3ed8e64d4ab4b2aebc0a42b9d644" +
-	"4a006f0075006500000000000000000000000000000000000000000800652e00000000" +
+	"4d006f0068006100000000000000000000000000000000000000000800652e00000000" +
 	"0000790100240804040302 0c0c0104000403090603090313040 30d0800000 40a" +
-	"0108040a00040214000000000050696c6f74653031000000000000000000000000000000000000000000000000000000000000" +
+	"0108040a0004021400000000004b617a752027 2d27000000000000000000000000000000000000000000000000000000000000" +
 	"519 4cb"
 
 // TestParseScoreSubmission : lire le dépôt réel doit donner le tournoi, la
@@ -104,7 +104,7 @@ func TestBoardOrderAndShape(t *testing.T) {
 		t.Errorf("%d entrée(s) annoncée(s), attendu 3", n)
 	}
 	// Chaque ligne fait 164 octets, plus un pied de 24 — la forme mesurée sur
-	// les dix pages de la capture. Sans ce pied, le jeu refuse la page entière.
+	// les dix pages de la measured. Sans ce pied, le jeu refuse la page entière.
 	if got := len(page) - 8; got != 3*scoreEntryLen+24 {
 		t.Errorf("%d octets après l'en-tête, attendu %d", got, 3*scoreEntryLen+24)
 	}

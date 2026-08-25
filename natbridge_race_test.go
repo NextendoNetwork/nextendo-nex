@@ -50,7 +50,7 @@ func TestBridgeReportsWhetherItCouldSubstitute(t *testing.T) {
 func TestJoinerIsAnsweredOnceTheHostReportsItsReplaceURL(t *testing.T) {
 	writeNatFile(t, "203.0.113.9 49275\n")
 
-	host := &Connection{Settings: testSettings(), PID: 1800000630}
+	host := &Connection{Settings: testSettings(), PID: 1001}
 	host.SetStations(hostBeforeReplaceURL())
 
 	// Not bridgeable yet.
@@ -84,7 +84,7 @@ func TestJoinerIsAnsweredOnceTheHostReportsItsReplaceURL(t *testing.T) {
 // Under -race this fails loudly without the lock; without -race it still catches a torn
 // or empty read.
 func TestStationsAreSafeToReadWhileTheOwnerReplacesThem(t *testing.T) {
-	host := &Connection{Settings: testSettings(), PID: 1800000630}
+	host := &Connection{Settings: testSettings(), PID: 1001}
 	host.SetStations(hostBeforeReplaceURL())
 
 	done := make(chan struct{})

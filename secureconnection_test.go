@@ -84,7 +84,7 @@ func TestIsPrivateIPUsesRealRanges(t *testing.T) {
 		{"100.64.0.1", true, "CGNAT"},
 		{"100.127.0.1", true, "CGNAT reaches 100.127 — the '100.64.' prefix missed it"},
 		{"100.128.0.1", false, "past CGNAT — public"},
-		{"73.131.202.35", false, "a real player's public address"},
+		{"a player address", false, "a real player's public address"},
 		{"", false, "not an address"},
 	} {
 		if got := isPrivateIP(c.addr); got != c.want {

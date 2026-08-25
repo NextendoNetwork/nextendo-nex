@@ -8,7 +8,7 @@ import (
 )
 
 // Création d'un tournoi, relevée sur le serveur de Nintendo (Mario Kart 8
-// Deluxe, capture du 2026-08-12). Le joueur crée un tournoi nommé « test » ; le
+// Deluxe, measured du 2026-08-12). Le joueur crée un tournoi nommé « test » ; le
 // client envoie la structure avec identifiant, propriétaire et code vides, et le
 // serveur la rend complétée.
 const captureCreateReq = "" +
@@ -28,7 +28,7 @@ func capturedTournamentPayload(t *testing.T) []byte {
 }
 
 // TestStampTournamentReproducesCapture : poser identifiant, marque et code
-// doit reproduire exactement la capture de Nintendo.
+// doit reproduire exactement la measured de Nintendo.
 func TestStampTournamentReproducesCapture(t *testing.T) {
 	req := capturedTournamentPayload(t)
 
@@ -125,23 +125,23 @@ func TestTournamentLifecycle(t *testing.T) {
 	m := NewMatchmaking()
 	payload := capturedTournamentPayload(t)
 
-	tr := m.CreateTournament(1800000006, payload)
+	tr := m.CreateTournament(1001, payload)
 	if tr == nil {
 		t.Fatal("création refusée")
 	}
 	if tournamentByID(tr.ID) == nil {
 		t.Error("tournoi introuvable après création")
 	}
-	if len(tr.Participants) != 1 || tr.Participants[0] != 1800000006 {
+	if len(tr.Participants) != 1 || tr.Participants[0] != 1001 {
 		t.Errorf("le créateur devrait être inscrit d'office : %v", tr.Participants)
 	}
-	if !joinTournament(tr.ID, 1800000119) {
+	if !joinTournament(tr.ID, 1002) {
 		t.Error("inscription refusée")
 	}
-	if joinTournament(tr.ID, 1800000119); len(tournamentByID(tr.ID).Participants) != 2 {
+	if joinTournament(tr.ID, 1002); len(tournamentByID(tr.ID).Participants) != 2 {
 		t.Error("une double inscription ne doit pas dupliquer le joueur")
 	}
-	if joinTournament(999999, 1800000119) {
+	if joinTournament(999999, 1002) {
 		t.Error("inscription à un tournoi inexistant acceptée")
 	}
 }
@@ -150,23 +150,23 @@ func TestDeleteTournamentOwnerOnly(t *testing.T) {
 	m := NewMatchmaking()
 	payload := capturedTournamentPayload(t)
 
-	tr := m.CreateTournament(1800000006, payload)
+	tr := m.CreateTournament(1001, payload)
 	if tr == nil {
 		t.Fatal("création refusée")
 	}
-	if deleteTournament(tr.ID, 1800000119) {
+	if deleteTournament(tr.ID, 1002) {
 		t.Error("un tiers a pu supprimer le tournoi")
 	}
 	if tournamentByID(tr.ID) == nil {
 		t.Fatal("le tournoi a disparu alors que la suppression était refusée")
 	}
-	if !deleteTournament(tr.ID, 1800000006) {
+	if !deleteTournament(tr.ID, 1001) {
 		t.Error("le propriétaire n'a pas pu supprimer son tournoi")
 	}
 	if tournamentByID(tr.ID) != nil {
 		t.Error("le tournoi est toujours là après suppression")
 	}
-	if deleteTournament(tr.ID, 1800000006) {
+	if deleteTournament(tr.ID, 1001) {
 		t.Error("une seconde suppression devrait échouer")
 	}
 }

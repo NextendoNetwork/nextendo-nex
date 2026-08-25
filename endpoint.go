@@ -13,7 +13,7 @@ import (
 // fragmentPacing is the delay inserted between successive fragments of a large reliable
 // response. Blasting every fragment of a big payload (e.g. SSBU's 15.7 KB DataStore init
 // = 13 fragments) at once overflows the console's small PRUDP window, the overflow is
-// silently dropped and the message never reassembles. Measured from a wire capture of the
+// silently dropped and the message never reassembles. Measured from a measurement of the
 // proven server: it emits the 13 fragments in strict order over ~200 ms, one every ~16 ms,
 // WITHOUT pausing for acks — so a fixed delay reproduces it exactly. (Ack-driven windowing
 // was tried here instead and stretched the same payload to ~2.2 s.)
@@ -59,7 +59,7 @@ type Endpoint struct {
 	OnRMC func(*Connection, *RMCMessage)
 	// OnNATProperties, if set, is called when a client reports its NAT behaviour +
 	// ping via NATTraversal ReportNATProperties, so the monitoring dashboard can show
-	// each player's NAT type and latency (lost when the games moved off the nex-go stack).
+	// each player's NAT type and latency (lost when the games moved off the the previous stack stack).
 	OnNATProperties func(pid uint64, natMap, natFilter, rtt uint32)
 
 	handlers map[uint16]RMCHandler
@@ -260,18 +260,6 @@ type Connection struct {
 	pending   map[uint16][]byte
 	pendingMu sync.Mutex
 
-	// lastDispatchedSeq / hasDispatched dedupe reliable DATA packets. The console's own
-	// PRUDP layer retransmits a request it hasn't seen an ack for in time, resending the
-	// SAME packet id as a fresh WebSocket frame — so "WebSocket delivers in order, no
-	// duplicates" does not save us here, the duplication happens one layer up. Without
-	// this, a retransmit under latency gets dispatched to the RMC handler TWICE (e.g. two
-	// createSession calls from one "Create Lobby" press, two different gatherings, two
-	// different responses to what the client tracks as one call) — the client's own state
-	// machine doesn't expect a second answer to an already-answered call and surfaces a
-	// communication error. The ack is still sent every time; only the dispatch is skipped.
-	lastDispatchedSeq uint16
-	hasDispatched     bool
-
 	state int
 	mu    sync.Mutex
 
@@ -417,7 +405,7 @@ func (c *Connection) processSYN(p *Packet) {
 		// the client completes the handshake but then sends its CONNECT with an EMPTY
 		// payload — it never hands over its Kerberos ticket, so the session is never
 		// really authenticated (which is what forced the PID-by-IP workaround). Wire
-		// capture of the secure connection with the client held constant: proven server
+		// measured of the secure connection with the client held constant: proven server
 		// SYN-ACK ACK|HASSIZE -> CONNECT plen=104; ours SYN-ACK ACK -> CONNECT plen=0,
 		// the only remaining difference across the whole handshake.
 		Flags:      FlagACK | FlagHasSize,
@@ -568,14 +556,6 @@ func (c *Connection) processData(p *Packet) {
 	if p.FragmentID == 0 {
 		full := c.fragBuf
 		c.fragBuf = nil
-		// A retransmission of the last complete packet we already dispatched: the ack
-		// above covers it (the console just needed that resent), but dispatching it a
-		// second time would re-run the RMC call. See lastDispatchedSeq's comment.
-		if c.hasDispatched && p.PacketID == c.lastDispatchedSeq {
-			return
-		}
-		c.lastDispatchedSeq = p.PacketID
-		c.hasDispatched = true
 		c.dispatchRMC(full)
 	}
 }
@@ -669,10 +649,10 @@ func (c *Connection) sendData(data []byte) {
 			rest = rest[fragSize:]
 			fragmentID++
 			// FIXED pacing between fragments, matching the proven server EXACTLY: the
-			// nex-go capture blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
+			// the previous stack measured blasts all 13 fragments of SSBU's 15.7 KB DataStore init in
 			// ~200 ms at a steady ~16 ms/fragment, in strict order, WITHOUT stopping to
 			// wait for acks. Ack-driven windowing here instead took ~2.2 s, which tripped
-			// SSBU's native DataStore-fetch watchdog and crashed Ryujinx (the small
+			// SSBU's native DataStore-fetch watchdog and crashed the emulator (the small
 			// single-fragment arena responses were unaffected, which is why arenas worked
 			// but quick match didn't). retransmitLoop still backstops any dropped fragment.
 			if fragmentPacing > 0 {
@@ -693,7 +673,7 @@ func (c *Connection) sendOneFragment(chunk []byte, fragmentID uint8) {
 		// NOT HasSize (0x8). With HasSize the console reads our plen field per fragment
 		// instead of the WebSocket frame length, which corrupts reassembly of a large
 		// multi-fragment payload (SSBU's 15 KB DataStore init) — it acks every fragment
-		// but never accepts the message. Match the capture exactly.
+		// but never accepts the message. Match the measured exactly.
 		Flags:      FlagReliable | FlagNeedACK,
 		SourceType: c.srcType, SourcePort: c.srcPort,
 		DestType: c.dstType, DestPort: c.dstPort,

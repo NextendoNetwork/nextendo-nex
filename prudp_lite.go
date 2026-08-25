@@ -41,7 +41,7 @@ const liteMagic byte = 0x80
 const liteHeaderSize = 12
 
 // liteConnSigKey keys the connection-signature HMAC (a fixed 15-byte constant
-// used by the Lite profile). Ported from the public protocol implementation.
+// used by the Lite profile). Telle que documentee par NintendoClients (MIT) — voir Credits dans le README.
 var liteConnSigKey = mustHex("26c31f381e46d6eb38e1af6ab70d11")
 
 func mustHex(s string) []byte {

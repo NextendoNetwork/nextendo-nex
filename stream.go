@@ -91,7 +91,7 @@ func WriteList[T any](s *StreamOut, list []T, f func(*StreamOut, T)) {
 
 // WriteMap writes a NEX Map<K,V>: a u32 pair count followed by key/value pairs.
 // Go map iteration order is randomized; callers needing a byte-stable output
-// (e.g. to reproduce a capture) must serialize from an ordered source instead.
+// (e.g. to reproduce a measured) must serialize from an ordered source instead.
 func WriteMap[K comparable, V any](s *StreamOut, m map[K]V, kf func(*StreamOut, K), vf func(*StreamOut, V)) {
 	s.U32(uint32(len(m)))
 	for k, v := range m {

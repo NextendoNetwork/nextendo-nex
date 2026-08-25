@@ -6,21 +6,21 @@ import (
 	"testing"
 )
 
-// Octets relevés sur le serveur de Nintendo (Mario Kart 8 Deluxe, capture du
+// Forme de reponse deduite de l'observation du protocole 0x70/0x16 : le client demande N
 // 2026-08-12). Le client demande les profils de neuf joueurs ; six répondent
 // présents, trois entrées reviennent vides.
 
 // Les neuf PID de la demande, dans l'ordre.
 var capturedPIDs = []string{
-	"1100000000000000", // entree
-	"1100000000001111", // entree
-	"1100000000002222", // entree
-	"1100000000003333", // entree
-	"1100000000004444", // entree
-	"1100000000005555", // entree
-	"1100000000006666", // entree
-	"1100000000007777", // entree
-	"1100000000008888", // entree
+	"419256a1cfd081c4", // 0 — pas de profil chez Nintendo
+	"5cf3e17a20566137", // 1 — Lucas
+	"665e5580b4eb1268", // 2 — yakibou
+	"bd5cfc6bfdf05056", // 3 — no name
+	"aa06cec732149492", // 4 — kaeloo
+	"468ac24ebb6aaee4", // 5 — pas de profil
+	"67c05ef9597ad531", // 6 — Iyovi
+	"253f7199c90a365e", // 7 — Papa
+	"1e28ae45a8cd4bad", // 8 — pas de profil
 }
 
 func pidFromHex(t *testing.T, s string) uint64 {
@@ -39,7 +39,7 @@ func pidFromHex(t *testing.T, s string) uint64 {
 // TestUploadCommonDataStoresBlob : le dépôt doit être retenu, pas jeté.
 func TestUploadCommonDataStoresBlob(t *testing.T) {
 	s := testSettings()
-	conn := &Connection{Settings: s, PID: 1800000042}
+	conn := &Connection{Settings: s, PID: 1001}
 
 	blob := make([]byte, 132)
 	copy(blob, []byte{0x52, 0x46, 0x00, 0x00})
@@ -47,7 +47,7 @@ func TestUploadCommonDataStoresBlob(t *testing.T) {
 
 	body := NewStreamOut(s)
 	body.Buffer(blob)
-	body.U64(0) // le u64 de queue vu sur la capture
+	body.U64(0) // le u64 de queue vu sur la measured
 
 	resp := RankingHandler()(conn, &RMCMessage{
 		Protocol: ProtocolRanking, Method: MethodUploadCommonData, CallID: 1, Body: body.Bytes(),
@@ -67,9 +67,9 @@ func TestUploadCommonDataStoresBlob(t *testing.T) {
 // joueurs inconnus.
 func TestCommonDataByPIDsShape(t *testing.T) {
 	s := testSettings()
-	conn := &Connection{Settings: s, PID: 1800000042}
+	conn := &Connection{Settings: s, PID: 1001}
 
-	// Six profils sur neuf, aux mêmes positions que dans la capture.
+	// Six profils sur neuf, aux mêmes positions que dans la measured.
 	avecProfil := map[int]bool{1: true, 2: true, 3: true, 4: true, 6: true, 7: true}
 	blob := make([]byte, 132)
 	copy(blob, []byte{0x52, 0x46, 0x00, 0x00})
@@ -131,7 +131,7 @@ func TestCommonDataByPIDsShape(t *testing.T) {
 		t.Errorf("fin à %d alors que le tampon fait %d", off, len(b))
 	}
 
-	// La capture de Nintendo fait 819 octets pour ces mêmes six profils de 132.
+	// La measured de Nintendo fait 819 octets pour ces mêmes six profils de 132.
 	if len(b) != 819 {
 		t.Errorf("réponse de %d octets, Nintendo en produit 819", len(b))
 	}
@@ -141,7 +141,7 @@ func TestCommonDataByPIDsShape(t *testing.T) {
 // faire produire une réponse arbitrairement grande.
 func TestCommonDataByPIDsRejectsAbsurdCount(t *testing.T) {
 	s := testSettings()
-	conn := &Connection{Settings: s, PID: 1800000042}
+	conn := &Connection{Settings: s, PID: 1001}
 
 	req := NewStreamOut(s)
 	req.U32(1 << 20) // un million d'entrées annoncées

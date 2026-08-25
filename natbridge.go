@@ -21,8 +21,8 @@ import (
 // Without it the joiner gets the TCP port, the probe never lands, and the console gives
 // up: it stops after MatchMakingExt m=1 and re-registers in a loop until the game shows a
 // connection error. That is the exact shape of the MK8 worldwide failure, and it is why
-// worldwide broke when MK8 moved to this core — the nex-go stack had this bridge
-// (nex-protocols-common-go/match-making/get_session_urls.go), and it was not ported.
+// worldwide broke when MK8 moved to this core — the the previous stack stack had this bridge
+//, and it was not ported.
 //
 // The file is written by the nncs responder co-located with the game server
 // (NNCS_NAT_FILE). It MUST be local: a responder on another host cannot share it.
@@ -198,7 +198,7 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// PERDAIT ce CID : le visiteur perçait le NAT mais la session Pia ne se montait jamais →
 	// « console ne répond pas » (2618-0502). On n'échange que le port UDP (celui observé par nncs) ;
 	// type/Pa sont retirés pour que la console reconnaisse le candidat LOCAL (une URL LAN portant
-	// type=public fait sauter le candidat par Pia). Prouvé par la capture nex-go GetSessionURLs :
+	// type=public fait sauter le candidat par Pia). Prouvé par la measured the previous stack GetSessionURLs :
 	// LAN = address=<privée>;port=<udp>;CID=<cid du ReplaceURL>;RVCID.
 	lan := local.Copy()
 	lan.SetInt("port", udpPort)
@@ -210,8 +210,8 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
 	// Pa mirrors the proven server. MK8/S2 send Pa=<private> (the default); ACNH's Pia
 	// instead reads the public candidate's Pa as the endpoint to reach, so it must be the
-	// PUBLIC address — the nex-go server ACNH is known to work against sends address==Pa==
-	// public (capture acnh nexgo_reference.bin). Pa=<private> there sends the joiner's probe
+	// PUBLIC address — the the previous stack server ACNH is known to work against sends address==Pa==
+	// public (mesure sur le serveur de reference ACNH). Pa=<private> there sends the joiner's probe
 	// to the host's LAN address and stalls it at "getting ready to depart" (2618-0502).
 	pa := privateAddr
 	if publicFirst {
@@ -229,7 +229,7 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// Station order. MK8/S2 take [lan, public] (the default). ACNH's Pia treats the FIRST
 	// station as the primary P2P candidate and never falls through to the second, so a
 	// remote joiner handed [lan, ...] probes the unreachable 192.168.x address and fails;
-	// the nex-go server ACNH works against sends [public, lan]. Reproduce that here.
+	// the the previous stack server ACNH works against sends [public, lan]. Reproduce that here.
 	if publicFirst {
 		return []*StationURL{pub, lan}, bridgeOK
 	}

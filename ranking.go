@@ -15,7 +15,7 @@ import (
 // nom Mii, pseudo en jeu, pays. Chacun dépose le sien (méthode 0x04) et
 // demande celui des autres (méthode 0x16) en donnant une liste de PID.
 //
-// Relevé sur le serveur de Nintendo (capture du 2026-08-12) :
+// Relevé sur le serveur de Nintendo (measured du 2026-08-12) :
 //
 //	C->S  0x70/0x04  Buffer(132 octets) + u64      -> réponse vide
 //	C->S  0x70/0x16  u32 nombre + N × u64 pid      -> u8 version, u32 taille,
@@ -33,7 +33,7 @@ const (
 	ProtocolRanking        uint16 = 0x70
 	MethodUploadCommonData uint32 = 0x4
 
-	// methodRankingGetCompetitionInfo : liste des tournois. Sur la capture,
+	// methodRankingGetCompetitionInfo : liste des tournois. Sur la measured,
 	// Nintendo rend 85 tournois ; sans tournoi chez nous, une liste vide.
 	methodRankingGetCompetitionInfo uint32 = 0x12
 	// methodRankingCompetitionRanking : classement d'UN tournoi. Laissée sans
@@ -50,10 +50,10 @@ const (
 	// MÊME seconde, à l'arrivée. Non gérée, elle rendait une erreur à chacun.
 	methodRankingSubmitScore uint32 = 0x11
 	// methodRankingSubmitTime : dépôt d'un temps de contre-la-montre (171 octets
-	// sur la capture). Nintendo y répond un corps vide.
+	// sur la measured). Nintendo y répond un corps vide.
 	methodRankingSubmitTime uint32 = 0x13
 
-	// commonDataMaxLen borne ce qu'un client peut nous faire stocker. La capture
+	// commonDataMaxLen borne ce qu'un client peut nous faire stocker. La measured
 	// donne 132 octets ; on garde de la marge sans laisser un client pousser
 	// n'importe quoi en mémoire.
 	commonDataMaxLen = 4096
@@ -164,7 +164,7 @@ func commonDataFlusher() {
 }
 
 // PutCommonData enregistre le profil d'un joueur. Exporté pour qu'un serveur de
-// jeu puisse l'alimenter autrement (rejeu de capture, amorçage).
+// jeu puisse l'alimenter autrement (rejeu de measured, amorçage).
 func PutCommonData(pid uint64, blob []byte) {
 	if len(blob) == 0 || len(blob) > commonDataMaxLen {
 		return
@@ -216,7 +216,7 @@ func RankingHandler() RMCHandler {
 				recordScore(conn.PID, req.Body) // alimente le classement du tournoi
 			}
 			// La réponse n'est PAS vide : Nintendo rend un seul octet à zéro
-			// (mesuré sur la capture du 2026-08-12, méthode 0x11, len=1 « 00 »).
+			// (mesuré sur la measured du 2026-08-12, méthode 0x11, len=1 « 00 »).
 			return NewRMCSuccess(conn.Settings, ProtocolRanking, req.Method, req.CallID, []byte{0})
 		default:
 			return notImplemented(conn, ProtocolRanking, req)
@@ -270,7 +270,7 @@ func commonDataByPIDs(conn *Connection, req *RMCMessage) *RMCMessage {
 		body.QBuffer(CommonData(pid))
 	}
 
-	// Enveloppe relevée sur la capture : version puis taille du contenu.
+	// Enveloppe relevée sur la measured : version puis taille du contenu.
 	out := NewStreamOut(s)
 	out.U8(0)
 	out.U32(uint32(len(body.Bytes())))
@@ -280,10 +280,10 @@ func commonDataByPIDs(conn *Connection, req *RMCMessage) *RMCMessage {
 
 // scoresStore garde le dernier résultat déposé par chaque joueur, par méthode.
 // Il n'alimente PAS encore le classement : celui-ci attend une forme différente
-// (5 enregistrements de 3312 octets sur la capture) qu'on n'a pas décodée. On
+// (5 enregistrements de 3312 octets sur la measured) qu'on n'a pas décodée. On
 // conserve donc les trames pour les analyser hors ligne, sans avoir à redemander
 // une course à qui que ce soit — c'est ce qui a manqué à chaque fois qu'il a
-// fallu relancer une capture.
+// fallu relancer une measured.
 var scoresStore sync.Map // clé "pid/méthode" -> []byte
 
 // keepSubmittedScore retient un dépôt. Borné comme le reste : un client ne doit

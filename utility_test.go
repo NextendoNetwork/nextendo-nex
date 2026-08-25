@@ -9,7 +9,7 @@ import (
 // made it look like the servers were fine.
 func TestUtilityHandsOutNexUniqueID(t *testing.T) {
 	s := testSettings()
-	conn := &Connection{Settings: s, PID: 1800000466}
+	conn := &Connection{Settings: s, PID: 1001}
 	h := UtilityHandler()
 
 	t.Run("AcquireNexUniqueID returns the pid", func(t *testing.T) {
@@ -17,7 +17,7 @@ func TestUtilityHandsOutNexUniqueID(t *testing.T) {
 		if resp == nil || resp.IsError {
 			t.Fatalf("want success, got %+v", resp)
 		}
-		if got := NewStreamIn(resp.Body, s).U64(); got != 1800000466 {
+		if got := NewStreamIn(resp.Body, s).U64(); got != 1001 {
 			t.Errorf("unique id = %d, want the caller's pid", got)
 		}
 	})
@@ -31,12 +31,12 @@ func TestUtilityHandsOutNexUniqueID(t *testing.T) {
 		var info UniqueIDInfo
 		NewStreamIn(resp.Body, s).Extract(&info)
 
-		if info.NEXUniqueID != 1800000466 {
+		if info.NEXUniqueID != 1001 {
 			t.Errorf("unique id = %d, want the caller's pid", info.NEXUniqueID)
 		}
 		// Stable and derived: the same account must get the same password every time, or a
 		// returning player's stored credentials stop matching.
-		if want := uint64(1800000466) ^ nexUniqueIDPasswordSalt; info.NEXUniqueIDPassword != want {
+		if want := uint64(1001) ^ nexUniqueIDPasswordSalt; info.NEXUniqueIDPassword != want {
 			t.Errorf("password = %d, want %d (pid ^ salt)", info.NEXUniqueIDPassword, want)
 		}
 	})
@@ -59,7 +59,7 @@ func TestUtilityHandsOutNexUniqueID(t *testing.T) {
 // all is the contract; NotImplemented aborts the finish with 2306-0103.
 func TestUpdateMatchmakeSessionPartIsAcknowledged(t *testing.T) {
 	s := testSettings()
-	conn := &Connection{Settings: s, PID: 1800000466}
+	conn := &Connection{Settings: s, PID: 1001}
 	m := NewMatchmaking()
 
 	resp := m.ExtensionHandler()(conn, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodUpdateMatchmakeSessionPart, 1, nil))
@@ -77,7 +77,7 @@ func TestUpdateApplicationBufferStoresTheHostsBuffer(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	m := NewMatchmaking()
-	host := &Connection{Settings: s, Endpoint: ep, PID: 1800000006}
+	host := &Connection{Settings: s, Endpoint: ep, PID: 1002}
 	ext := m.ExtensionHandler()
 
 	// Host creates a gathering.
@@ -111,7 +111,7 @@ func TestUpdateApplicationBufferStoresTheHostsBuffer(t *testing.T) {
 	}
 
 	// A joiner must not be able to rewrite the host's match.
-	joiner := &Connection{Settings: s, Endpoint: ep, PID: 1800000519}
+	joiner := &Connection{Settings: s, Endpoint: ep, PID: 1003}
 	if r := ext(joiner, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodUpdateApplicationBuffer, 3, req.Bytes())); r == nil || !r.IsError {
 		t.Errorf("a non-owner must be denied, got %+v", r)
 	}

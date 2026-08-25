@@ -4,7 +4,7 @@ package nex
 //
 // CE QU'ILS SONT : des compétitions créées par les JOUEURS — un nom, deux noms
 // d'équipes, une douzaine de règles (cylindrée, objets, circuits), et un code à
-// 12 chiffres pour les partager. La capture du serveur de Nintendo en montre 85
+// 12 chiffres pour les partager. La measured du serveur de Nintendo en montre 85
 // en même temps : « Mario vs Luigi », « Hide & Seek », « 200CC TOURNAMENT ».
 //
 // LE PRINCIPE, ET IL EST SIMPLE : on ne décode PAS la structure entière. Le créateur
@@ -37,19 +37,19 @@ const (
 	// MethodTournamentCreate : le jeu envoie son tournoi, on le rend complété.
 	MethodTournamentCreate uint32 = 0x3D
 	// MethodTournamentDelete : suppression, l'identifiant sur 4 octets. Absente de
-	// la capture (aucun tournoi n'y a été supprimé) ; relevée en production, où
+	// la measured (aucun tournoi n'y a été supprimé) ; relevée en production, où
 	// elle arrivait non gérée et rendait donc une erreur 2306-0103 au joueur.
 	MethodTournamentDelete uint32 = 0x3E
-	// tournamentCodeLen : longueur du code partagé, relevée sur la capture.
+	// tournamentCodeLen : longueur du code partagé, relevée sur la measured.
 	tournamentCodeLen = 12
-	// tournamentMaxBlob borne ce qu'un client peut nous faire stocker (la capture
+	// tournamentMaxBlob borne ce qu'un client peut nous faire stocker (la measured
 	// donne 233 octets ; on garde de la marge sans accepter n'importe quoi).
 	tournamentMaxBlob = 4096
 	// tournamentMax borne le nombre de tournois retenus. Nintendo en sert 85 ;
 	// au-delà de cette borne on cesse d'en créer plutôt que de croître sans fin.
 	tournamentMax = 2000
 	// tournamentNameLengthOffset is the u16 byte length of the UTF-16 name,
-	// including its terminator, in the captured MK8D structure.
+	// including its terminator, in the measured MK8D structure.
 	tournamentNameLengthOffset = 0x69
 )
 
@@ -373,7 +373,7 @@ func (m *Matchmaking) createTournament(conn *Connection, req *RMCMessage) *RMCMe
 }
 
 // writeTournamentList sérialise une liste de tournois : u32 nombre, puis par
-// entrée u8 version, u32 longueur, contenu. Forme relevée sur la capture.
+// entrée u8 version, u32 longueur, contenu. Forme relevée sur la measured.
 func writeTournamentList(s *Settings, list []*Tournament) []byte {
 	out := NewStreamOut(s)
 	valid := make([]*Tournament, 0, len(list))
@@ -476,7 +476,7 @@ func TournamentSummaries() []byte {
 		put32(28)              // longueur de l'entrée
 		put32(t.ID)
 		put32(uint32(len(t.Participants)))
-		put32(4) // constant sur les 85 exemplaires de la capture
+		put32(4) // constant sur les 85 exemplaires de la measured
 		put32(0)
 		put32(0)
 		put32(0)

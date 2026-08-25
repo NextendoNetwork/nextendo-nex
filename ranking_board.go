@@ -2,7 +2,7 @@ package nex
 
 // Classement des tournois Mario Kart 8 Deluxe.
 //
-// LES DEUX FORMATS, relevés sur le serveur de Nintendo (capture du 2026-08-12,
+// LES DEUX FORMATS, relevés sur le serveur de Nintendo (measured du 2026-08-12,
 // un joueur courant un tournoi jusqu'au bout puis ouvrant le classement).
 //
 // Ce que le jeu DÉPOSE en fin de course (0x70/0x11, 161 octets) :
@@ -10,7 +10,7 @@ package nex
 //	+0x00  u8   version
 //	+0x01  u32  longueur du contenu
 //	+0x05  u32  identifiant du TOURNOI
-//	+0x09  u32  catégorie (393 sur la capture — le mode/circuit)
+//	+0x09  u32  catégorie (393 sur la measured — le mode/circuit)
 //	+0x11  u32  SCORE
 //	+0x1b  u16  132, puis le profil du joueur (Mii + pseudo)
 //
@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	// scoreEntryLen : taille d'une ligne de classement, vérifiée sur la capture.
+	// scoreEntryLen : taille d'une ligne de classement, vérifiée sur la measured.
 	scoreEntryLen = 164
 	// scoreEntryBody : longueur annoncée dans la ligne (164 - 1 version - 4 longueur).
 	scoreEntryBody = 159
@@ -188,7 +188,7 @@ func writeBoard(cat uint32, entries []*boardEntry) []byte {
 	// PIED DE PAGE, 24 octets. Il manquait, et sans lui le jeu refuse la page
 	// entière : « Pas de classement disponible pour l'instant » alors que le
 	// serveur renvoyait bien huit joueurs. Relevé sur les dix pages de la
-	// capture : le nombre TOTAL de joueurs de la manche, puis 4 (constant sur
+	// measured : le nombre TOTAL de joueurs de la manche, puis 4 (constant sur
 	// toutes), puis seize zéros.
 	pput32(uint32(len(entries)))
 	pput32(4)

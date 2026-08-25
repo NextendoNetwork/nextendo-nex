@@ -92,9 +92,9 @@ func (m *Matchmaking) updateNotificationData(conn *Connection, req *RMCMessage) 
 	}
 	m.notif.put(conn.PID, typ, ev)
 	fmt.Printf("[MM] notification publiée pid=%d type=%d param1=%d param2=%d\n", conn.PID, typ, p1, p2)
-	// POUSSE en temps réel aux amis EN LIGNE, comme le serveur nex-go de référence : il n'attend
+	// POUSSE en temps réel aux amis EN LIGNE, comme le serveur the previous stack de référence : il n'attend
 	// pas le polling (méthode 13), il envoie un ProcessNotificationEvent dès qu'un ami publie sa
-	// présence. Mesuré sur capture : le type poussé = type_publié × 1000 (101 -> 101000, 109 ->
+	// présence. Mesuré sur measured : le type poussé = type_publié × 1000 (101 -> 101000, 109 ->
 	// 109000). Sans ça la Pia d'ACNH n'a jamais l'événement de présence temps réel de l'hôte que
 	// le visiteur attend pour finaliser la visite.
 	m.pushNotifDataToFriends(conn, ev)
@@ -102,7 +102,7 @@ func (m *Matchmaking) updateNotificationData(conn *Connection, req *RMCMessage) 
 }
 
 // pushNotifDataToFriends envoie l'événement de présence de l'appelant à chacun de ses amis EN
-// LIGNE (ProcessNotificationEvent). Type poussé = type × 1000 (forme mesurée sur nex-go). Sans
+// LIGNE (ProcessNotificationEvent). Type poussé = type × 1000 (forme mesurée sur the previous stack). Sans
 // source d'amis (autres jeux), ne fait rien.
 func (m *Matchmaking) pushNotifDataToFriends(conn *Connection, ev *NotificationEvent) {
 	if m.FriendPIDs == nil {
@@ -176,7 +176,7 @@ func (m *Matchmaking) getFriendNotificationData(conn *Connection, req *RMCMessag
 	}
 	fmt.Printf("[MM] notifications d'amis pid=%d types=%v -> %d entrée(s)\n", conn.PID, types, len(events))
 	resp := NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
-	// En plus de la réponse au polling, POUSSE chaque présence d'ami au demandeur (comme nex-go,
+	// En plus de la réponse au polling, POUSSE chaque présence d'ami au demandeur (comme the previous stack,
 	// qui envoie un ProcessNotificationEvent type=×1000 par ami en ligne). Envoyé après la réponse
 	// pour ne pas s'intercaler dedans.
 	for _, ev := range events {

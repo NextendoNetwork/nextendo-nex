@@ -34,7 +34,7 @@ const (
 	// CloseParticipation(gid) locks a gathering against new joiners — the game calls it to
 	// start the match (Splatoon 2 fires it once matchmaking gives up filling the lobby).
 	// Answering NotImplemented here aborts S2's online session with 2306-0103 "an error has
-	// occurred": measured by capturing both servers with the same client, this was the LAST
+	// occurred": measured by measuring both servers with the same client, this was the LAST
 	// call before the error, and the proven server answers it and carries on.
 	MethodCloseParticipation              uint32 = 0x01
 	MethodOpenParticipation               uint32 = 0x02
@@ -45,8 +45,8 @@ const (
 	// UpdateApplicationBuffer(gid, buffer) is how a HOST publishes its match configuration
 	// into the gathering — Smash sends ~422 bytes of it as soon as a lobby forms. Joiners
 	// read it back off the session, so refusing it leaves them with a session they cannot
-	// interpret and the lobby loops back to matchmaking (2618-0006). The nex-go stack
-	// implemented it (nex-protocols-common-go/matchmake-extension/update_application_buffer.go)
+	// interpret and the lobby loops back to matchmaking (2618-0006). The the previous stack stack
+	// implemented it
 	// and this core did not — a host's buffer was silently rejected on every lobby.
 	MethodUpdateApplicationBuffer uint32 = 0x0B
 
@@ -78,8 +78,8 @@ const (
 	MethodSSBUArenaCode     uint32 = 0x37 // arena code create (same struct as MK8 0x44)
 	MethodSSBUArenaResolve  uint32 = 0x38 // resolve arena code → bare u32 gid (like 0x45)
 	MethodFindByGidList     uint32 = 0x30 // FindMatchmakeSessionByGatheringID (list<gid> → list<session>)
-	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (captured Nintendo value)
-	// Tournois Mario Kart 8, relevés sur la capture du serveur de Nintendo :
+	MethodSSBUPreMatch      uint32 = 0x3A // pre-AutoMatchmake probe → bare u32 = 2 (measured Nintendo value)
+	// Tournois Mario Kart 8, relevés sur la measured du serveur de Nintendo :
 	// 0x39 recherche (critère → liste), 0x3F inscription (id → réponse vide).
 	// 0x3A est partagé avec la sonde SSBU ci-dessus, d'où le tri par forme.
 	MethodTournamentSearch uint32 = 0x39
@@ -118,7 +118,7 @@ type Matchmaking struct {
 	// éprouvée contre leur serveur.
 	PublicStationFirst bool
 	// JoinRespExistingCount fait renvoyer, dans la réponse à JoinMatchmakeSessionWithParam, le
-	// nombre de participants AVANT l'ajout du visiteur (comme nex-go) au lieu d'après. La Pia
+	// nombre de participants AVANT l'ajout du visiteur (comme the previous stack) au lieu d'après. La Pia
 	// d'Animal Crossing dimensionne son maillage P2P sur ce nombre : compté inclus, le visiteur
 	// attend une « autre console » fantôme et échoue (2618-0502). Défaut false : MK8 (AutoMatchmake)
 	// et SSBU gardent le comptage après-ajout avec lequel ils fonctionnent.
@@ -206,7 +206,7 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			// attend une LISTE en retour. Lui répondre 2 lui faisait lire deux
 			// entrées inexistantes au-delà du tampon.
 			//
-			// On distingue par la forme de la requête, mesurée sur capture : MK8
+			// On distingue par la forme de la requête, mesurée sur measured : MK8
 			// envoie u32 nombre + nombre × u32, donc exactement 4+4n octets.
 			if isTournamentIDList(req.Body) {
 				return m.tournamentsByIDs(conn, req)
@@ -316,7 +316,7 @@ func (s *SimplePlayingSession) Levels() []Level {
 // friend list calls this with the PIDs of friends it wants to join; for each PID
 // that is actually in a live gathering we return that gathering's id, so the
 // joiner can then FindMatchmakeSessionBySingleID + JoinMatchmakeSession. Returning
-// an empty list (what mk8cs did before) makes every friend-join fail because the
+// an empty list (what the game server did before) makes every friend-join fail because the
 // joiner never learns which session to join. Request = list<PID> + bool
 // (include the caller's own session).
 func (m *Matchmaking) playingSession(conn *Connection, req *RMCMessage) *RMCMessage {
@@ -414,7 +414,7 @@ func (m *Matchmaking) createGathering(conn *Connection, src *MatchmakeSession) *
 // when a new player (not the owner) joins — the event Pia's WaitNotification
 // blocks on. The joiner is never notified of its own join.
 // notifyParticipation replicates the proven server's join notifications, taken
-// byte-for-byte from a live 2-player capture:
+// byte-for-byte from a live 2-player measured:
 //  1. Participate(3001) about the CALLER (Param2=caller) -> pushed to EVERY current
 //     participant, INCLUDING the caller itself. The deployed server does NOT self-
 //     exclude: a lone host needs its own event to leave Pia's WaitNotification wall
@@ -669,11 +669,11 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 	}
 	g.session.NumParticipants = uint32(len(g.participants))
 	result := *g.session
-	// La réponse au JOIN doit annoncer le nombre de participants tel que le serveur nex-go de
+	// La réponse au JOIN doit annoncer le nombre de participants tel que le serveur the previous stack de
 	// référence le renvoie : le compte AVANT ajout du visiteur (juste l'hôte = 1), PAS après (2).
 	// La Pia d'Animal Crossing bâtit son maillage P2P d'après ce nombre : compté inclus (2), le
 	// visiteur attend une 2ᵉ « autre console » qui n'existe pas et échoue sur « one or more other
-	// consoles are not responding » (2618-0502). Mesuré : nex-go Join/39 = NumParticipants 1.
+	// consoles are not responding » (2618-0502). Mesuré : the previous stack Join/39 = NumParticipants 1.
 	if m.JoinRespExistingCount && joined {
 		result.NumParticipants = uint32(existing)
 	}
@@ -779,7 +779,7 @@ func (m *Matchmaking) browseNoHolder(conn *Connection, req *RMCMessage) *RMCMess
 		}
 		r := *g.session
 		// Recherche par Dodo Code (ACNH, wantCode!="") : le demandeur détient le code, il est
-		// donc autorisé à rejoindre → on GARDE la clé de session, comme nex-go et comme
+		// donc autorisé à rejoindre → on GARDE la clé de session, comme the previous stack et comme
 		// findByParticipant, sinon la visite cale (2618-0502). Recherche publique sans code
 		// (arène Smash) : on la retire pour ne pas la divulguer à un simple scan.
 		if wantCode == "" {
@@ -880,7 +880,7 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst)
 	if status != bridgeNoRVCID {
 		// Either it worked, or nothing a moment brings will change it.
-		return sessionURLsResponse(conn, req, urls)
+		return sessionURLsResponse(conn, req, relayedFor(conn, host, urls))
 	}
 
 	// The bridge needs the host's ReplaceURL, which carries its post-NAT port and RVCID —
@@ -916,7 +916,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 
 		if urls, status := natBridgeStations(host.Stations(), m.PublicStationFirst); status == bridgeOK {
 			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
-			conn.SendRMC(sessionURLsResponse(conn, req, urls))
+			conn.SendRMC(sessionURLsResponse(conn, req, relayedFor(conn, host, urls)))
 
 			return
 		}
@@ -925,7 +925,25 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 	// Out of time: answer with whatever the host reported. Not answering at all would
 	// leave the joiner hanging until ITS timeout, which is strictly worse.
 	fmt.Printf("[MM] GetSessionURLs pid=%d: host never reported its ReplaceURL -> raw stations\n", conn.PID)
-	conn.SendRMC(sessionURLsResponse(conn, req, host.Stations()))
+	conn.SendRMC(sessionURLsResponse(conn, req, relayedFor(conn, host, host.Stations())))
+}
+
+// relayedFor repointe les stations vers le port de la paire (visiteur, hote) quand le
+// relais par paire est arme. Applique au moment de REPONDRE, jamais dans le pont NAT :
+// le pont ne connait que les stations, pas qui les demande, alors que le port depend des
+// deux PID.
+func relayedFor(joiner, host *Connection, urls []*StationURL) []*StationURL {
+	if !PairRelayActive() || joiner == nil || host == nil || len(urls) == 0 {
+		return urls
+	}
+	ipJ, ipH := PublicIPOf(joiner), PublicIPOf(host)
+	rHost, rPort, ok := PairRelayFor(joiner.PID, host.PID, ipJ, ipH)
+	if !ok {
+		return urls
+	}
+	fmt.Printf("[relais-paire] URL de session pid=%d -> hote pid=%d : %s:%d\n", joiner.PID, host.PID, rHost, rPort)
+
+	return RelayStations(urls, rHost, rPort)
 }
 
 func sessionURLsResponse(conn *Connection, req *RMCMessage, urls []*StationURL) *RMCMessage {
@@ -1000,7 +1018,7 @@ func (m *Matchmaking) setParticipation(conn *Connection, req *RMCMessage, open b
 // an empty success — an acknowledgement, which is all the client is waiting for.
 //
 // What matters is that it is answered at all. NotImplemented aborts the finish with
-// 2306-0103 immediately after the results screen. This was implemented in the nex-go stack
+// 2306-0103 immediately after the results screen. This was implemented in the the previous stack stack
 // and lost when Splatoon 2 moved to this core.
 func (m *Matchmaking) updateSessionPart(conn *Connection, req *RMCMessage) *RMCMessage {
 	// Animal Crossing transmet ICI le « Dodo Code » de l hote : sans ecriture reelle, la
@@ -1300,7 +1318,7 @@ func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
 
 // isTournamentIDList reconnaît la requête « donne-moi ces tournois » de Mario
 // Kart : u32 nombre, suivi d'exactement autant d'identifiants sur 32 bits (la
-// capture en montre 85, soit 344 octets). La sonde SSBU qui partage ce numéro
+// measured en montre 85, soit 344 octets). La sonde SSBU qui partage ce numéro
 // de méthode n'a pas cette forme, d'où un tri fiable sans connaître le jeu.
 func isTournamentIDList(body []byte) bool {
 	if len(body) < 8 || len(body)%4 != 0 {

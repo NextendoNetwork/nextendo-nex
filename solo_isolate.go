@@ -16,7 +16,7 @@ import (
 // matched with real, unreachable consoles.
 //
 // The env is parsed once. Set it ONLY on the game server that should isolate those PIDs
-// (e.g. mk8cs) so other games/servers are unaffected.
+// (e.g. the game server) so other games/servers are unaffected.
 var (
 	soloPIDsOnce sync.Once
 	soloPIDsSet  map[uint64]bool
