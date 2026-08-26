@@ -19,6 +19,7 @@ const (
 	NotificationParticipantDisconnected uint32 = 3007   // ParticipationEvent.Disconnected
 	NotificationEndParticipation        uint32 = 3008   // ParticipationEvent.EndParticipation
 	NotificationOwnershipChanged        uint32 = 4000   // le salon change de proprietaire
+	NotificationRefereeRoundStarted     uint32 = 116000 // la manche arbitree commence
 	NotificationAddedToGathering        uint32 = 122000 // to a newly-added (non-caller) participant
 	NotificationGatheringUnregistered   uint32 = 109000 // gathering torn down
 	NotificationHostChanged             uint32 = 110000 // host migrated

@@ -55,10 +55,31 @@ func MatchmakeRefereeHandler() RMCHandler {
 			manches[manche] = append([]byte(nil), req.Body...)
 			manchesMu.Unlock()
 
+			// LE POINT QUI MANQUAIT.
+			//
+			// Rendre le numero de manche a celui qui l'ouvre ne suffit pas : le vrai service
+			// PREVIENT chaque joueur de la manche que la partie commence (type 116000). Sans
+			// cet avis, chaque pair emet ses deux messages d'entree et se tait — il attend un
+			// depart de manche qui n'arrive jamais. Onze consoles, onze fois exactement deux
+			// messages : le symptome le plus deterministe de la nuit.
+			for _, pid := range refereePIDs(req.Body, conn.Settings) {
+				c := RefereeEndpoint
+				if c == nil {
+					break
+				}
+				if t := c.FindConnectionByPID(pid); t != nil {
+					SendNotification(t, &NotificationEvent{
+						PIDSource: conn.PID,
+						Type:      NotificationRefereeRoundStarted,
+						Param1:    manche,
+					})
+				}
+			}
+
 			out := NewStreamOut(conn.Settings)
 			out.U64(manche)
-			fmt.Printf("[Referee] manche %d ouverte pour pid=%d (%d o de parametres)\n",
-				manche, conn.PID, len(req.Body))
+			fmt.Printf("[Referee] manche %d ouverte par pid=%d, %d joueur(s) prevenu(s)\n",
+				manche, conn.PID, len(refereePIDs(req.Body, conn.Settings)))
 
 			return NewRMCSuccess(conn.Settings, ProtocolMatchmakeReferee, req.Method, req.CallID, out.Bytes())
 
@@ -92,4 +113,35 @@ func MatchmakeRefereeHandler() RMCHandler {
 			return notImplemented(conn, ProtocolMatchmakeReferee, req)
 		}
 	}
+}
+
+// RefereeEndpoint sert a joindre les joueurs d'une manche. Pose par le serveur de jeu.
+var RefereeEndpoint *Endpoint
+
+// refereePIDs extrait la liste des joueurs du parametre de StartRound :
+//
+//	Uint32 categorie · Uint32 salon · List<PID> joueurs · Uint8 mode · Uint32 evenement
+//
+// precede de l'entete de structure (version + longueur). On lit ce qu'il faut et on
+// ignore le reste : seuls les PID nous interessent.
+func refereePIDs(corps []byte, s *Settings) []uint64 {
+	in := NewStreamIn(corps, s)
+	if s.StructHeader {
+		_ = in.U8()  // version
+		_ = in.U32() // longueur
+	}
+	_ = in.U32() // categorie de donnees personnelles
+	_ = in.U32() // salon
+	n := in.U32()
+	if n > 128 || in.Err() != nil {
+		return nil // liste incoherente : mieux vaut ne prevenir personne que n'importe qui
+	}
+	out := make([]uint64, 0, n)
+	for i := uint32(0); i < n; i++ {
+		out = append(out, in.PID())
+	}
+	if in.Err() != nil {
+		return nil
+	}
+	return out
 }
