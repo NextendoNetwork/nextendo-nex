@@ -15,11 +15,54 @@ import (
 const (
 	ProtocolRanking2 uint16 = 0x7A
 
-	MethodRanking2PutScore      uint32 = 1
-	MethodRanking2GetCommonData uint32 = 2
-	MethodRanking2PutCommonData uint32 = 3
-	MethodRanking2DelCommonData uint32 = 4
+	MethodRanking2PutScore           uint32 = 1
+	MethodRanking2GetCommonData      uint32 = 2
+	MethodRanking2PutCommonData      uint32 = 3
+	MethodRanking2DelCommonData      uint32 = 4
+	MethodRanking2GetCategorySetting uint32 = 7
 )
+
+// Ranking2CategorySetting decrit une categorie de classement : les bornes de score, le
+// rang le plus bas retenu, et quand la saison se remet a zero.
+type Ranking2CategorySetting struct {
+	MinScore           uint32
+	MaxScore           uint32
+	LowestRank         uint32
+	ResetMonth         uint16
+	ResetDay           uint8
+	ResetHour          uint8
+	ResetMode          uint8
+	MaxSeasonsToGoBack uint8
+	ScoreOrder         bool
+}
+
+// Levels implements Structure.
+func (s *Ranking2CategorySetting) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.U32(s.MinScore)
+			o.U32(s.MaxScore)
+			o.U32(s.LowestRank)
+			o.U16(s.ResetMonth)
+			o.U8(s.ResetDay)
+			o.U8(s.ResetHour)
+			o.U8(s.ResetMode)
+			o.U8(s.MaxSeasonsToGoBack)
+			o.Bool(s.ScoreOrder)
+		},
+		Load: func(i *StreamIn) {
+			s.MinScore = i.U32()
+			s.MaxScore = i.U32()
+			s.LowestRank = i.U32()
+			s.ResetMonth = i.U16()
+			s.ResetDay = i.U8()
+			s.ResetHour = i.U8()
+			s.ResetMode = i.U8()
+			s.MaxSeasonsToGoBack = i.U8()
+			s.ScoreOrder = i.Bool()
+		},
+	}}
+}
 
 // Ranking2Store garde les donnees communes par joueur. En memoire : un classement perdu
 // au redemarrage est un desagrement, pas une perte de donnee de compte.
@@ -62,6 +105,27 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			r.mu.Unlock()
 
 			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, nil)
+
+		case MethodRanking2GetCategorySetting:
+			// Le corps ne porte que le numero de categorie. On rend une categorie SANS
+			// remise a zero et sans borne de rang : nous ne tenons pas encore de
+			// classement, et une saison qui expire ferait disparaitre des scores qu'on
+			// n'a de toute facon pas. Le jeu, lui, a juste besoin d'une reponse valide
+			// pour continuer — sans elle il s'arrete avant meme de rejoindre le relais.
+			cat := uint32(0)
+			if len(req.Body) >= 4 {
+				cat = NewStreamIn(req.Body, conn.Settings).U32()
+			}
+			out := NewStreamOut(conn.Settings)
+			out.Add(&Ranking2CategorySetting{
+				MinScore:   0,
+				MaxScore:   0xFFFFFFFF,
+				LowestRank: 0, // 0 = pas de limite
+				ScoreOrder: true,
+			})
+			fmt.Printf("[Ranking2] reglages de la categorie %d rendus a pid=%d\n", cat, conn.PID)
+
+			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
 
 		default:
 			fmt.Printf("[Ranking2] methode %d non traitee pid=%d bodyLen=%d corps=% x\n",
