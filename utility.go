@@ -78,9 +78,12 @@ var utilityNbReglages = func() int {
 // Or PAC-MAN 99 finit son compte a rebours et ne demarre rien. Un « delai avant depart »
 // ou un « minimum de joueurs » lu a zero produirait exactement ca. Reglable pour pouvoir
 // le verifier au lieu d'en debattre.
-var utilityValeursReglages = func() map[int]int32 {
+var utilityValeursReglages = analyserValeursReglages(os.Getenv("NEX_UTILITY_VALEURS"))
+
+// analyserValeursReglages lit une liste "cle=valeur,cle=valeur".
+func analyserValeursReglages(brut string) map[int]int32 {
 	out := map[int]int32{}
-	for _, part := range strings.Split(os.Getenv("NEX_UTILITY_VALEURS"), ",") {
+	for _, part := range strings.Split(brut, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -97,7 +100,33 @@ var utilityValeursReglages = func() map[int]int32 {
 		out[ki] = int32(vi)
 	}
 	return out
-}()
+}
+
+// utilityReglagesPour rend les reglages d'UN groupe donne.
+//
+// LE PROBLEME QU'ON CORRIGE. GetIntegerSettings porte un INDEX, et on ne le lisait que pour
+// l'ecrire dans le journal : quel que soit le groupe demande, on rendait le meme. Le
+// journal de SMB35 montre que le jeu en demande deux — l'index 0 (389 fois) et l'index 10
+// (15 fois, systematiquement juste avant de consulter les reglages de la categorie de
+// classement 100). Les deux recevaient la meme reponse.
+//
+// On ne sait PAS ce que le groupe 10 devrait contenir. La correction n'est donc pas de
+// deviner une valeur, c'est d'arreter de confondre les deux : chaque index peut desormais
+// avoir ses propres reglages, par NEX_UTILITY_REGLAGES_<index> et NEX_UTILITY_VALEURS_<index>.
+//
+// SANS CONFIGURATION, RIEN NE CHANGE. Un index sans reglages propres retombe sur les
+// valeurs globales, c'est-a-dire exactement ce qui est rendu aujourd'hui — l'appariement
+// de PAC-MAN 99 et de SMB35 depend de ce groupe 0, et on ne le modifie pas en passant.
+// Cela rend simplement le groupe 10 mesurable sans toucher au groupe qui fonctionne.
+func utilityReglagesPour(idx int64) (int, map[int]int32) {
+	if idx >= 0 {
+		suffixe := strconv.FormatInt(idx, 10)
+		if n, err := strconv.Atoi(os.Getenv("NEX_UTILITY_REGLAGES_" + suffixe)); err == nil && n >= 0 && n <= 4096 {
+			return n, analyserValeursReglages(os.Getenv("NEX_UTILITY_VALEURS_" + suffixe))
+		}
+	}
+	return utilityNbReglages, utilityValeursReglages
+}
 
 // UniqueIDInfo is the Utility structure returned by AcquireNexUniqueIDWithPassword:
 // the id plus the password the title stores alongside it.
@@ -138,14 +167,15 @@ func UtilityHandler() RMCHandler {
 			// compte-t-il ? Si le comportement ne bouge pas, le mur est ailleurs.
 			// A RETIRER ensuite : c est une sonde, pas une implementation.
 			out := NewStreamOut(conn.Settings)
-			if n := utilityNbReglages; req.Method == MethodGetIntegerSettings && n > 0 {
-				out.U32(uint32(n))
-				for k := 0; k < n; k++ {
+			nbReglages, valeurs := utilityReglagesPour(idx)
+			if req.Method == MethodGetIntegerSettings && nbReglages > 0 {
+				out.U32(uint32(nbReglages))
+				for k := 0; k < nbReglages; k++ {
 					out.U16(uint16(k))
-					out.U32(uint32(utilityValeursReglages[k])) // absente = 0
+					out.U32(uint32(valeurs[k])) // absente = 0
 				}
-				fmt.Printf("[Utility] carte de reglages : %d entrees, valeurs non nulles=%v\n",
-					n, utilityValeursReglages)
+				fmt.Printf("[Utility] carte de reglages groupe=%d : %d entrees, valeurs non nulles=%v\n",
+					idx, nbReglages, valeurs)
 			} else {
 				out.U32(0) // empty Map<u16, ...>
 			}
