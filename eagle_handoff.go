@@ -91,40 +91,45 @@ func (n *NotificationEventV1) Levels() []Level {
 	}}
 }
 
-// eagleTokenPayload : ce que le jeton porte, avant encodage.
+// eagleTokenPayload : ce que le jeton porte.
+//
+// Formats VERIFIES contre le serveur SMB35 de kinnay (AGPL — lu pour les faits du
+// protocole, jamais recopie). Chacun compte : le salon en DECIMAL, le PID en hexa sur
+// SEIZE chiffres avec les zeros de tete.
 type eagleTokenPayload struct {
-	ExpiresAt string `json:"expires_at"` // horodatage en SECONDES, en chaine
+	ExpiresAt string `json:"expires_at"` // secondes epoch, en chaine
 	ServerEnv string `json:"server_env"` // "lp1"
-	ServerID  string `json:"server_id"`  // 20 caracteres alphanumeriques minuscules
-	UserID    string `json:"user_id"`    // le PID du joueur, en hexadecimal
+	ServerID  string `json:"server_id"`  // l'id du SALON, en decimal
+	UserID    string `json:"user_id"`    // le PID, hexa sur 16 chiffres
 }
 
-// eagleToken : l'enveloppe signee.
+// eagleToken : l'enveloppe signee. La charge utile y est un OBJET JSON imbrique, pas une
+// chaine encodee — on avait suppose l'inverse, et le jeu n'en voulait pas.
 type eagleToken struct {
-	Payload   string `json:"payload"`
-	Signature string `json:"signature"`
-	Version   int    `json:"version"`
+	Payload   eagleTokenPayload `json:"payload"`
+	Signature string            `json:"signature"`
+	Version   int               `json:"version"`
 }
 
 // BuildEagleToken fabrique le jeton qu'un joueur presentera au relais.
 //
-// C'est NOTRE serveur Eagle qui le verifiera, donc la signature n'a a convaincre que
-// nous-memes : un HMAC-SHA256 sur la charge utile encodee suffit. Le client, lui, ne
-// fait que transporter la chaine sans la lire.
-func BuildEagleToken(secret []byte, pid uint64, serverID string, duree time.Duration) (string, error) {
-	brut, err := json.Marshal(eagleTokenPayload{
+// La signature porte sur le JSON de la charge utile TELLE QU'ELLE SERA SERIALISEE, et
+// c'est NOTRE relais qui la verifiera : elle n'a a convaincre que nous-memes. Le client
+// ne fait que transporter la chaine.
+func BuildEagleToken(secret []byte, pid uint64, gid uint32, duree time.Duration) (string, error) {
+	charge := eagleTokenPayload{
 		ExpiresAt: strconv.FormatInt(time.Now().Add(duree).Unix(), 10),
 		ServerEnv: "lp1",
-		ServerID:  serverID,
-		UserID:    fmt.Sprintf("%x", pid),
-	})
+		ServerID:  strconv.FormatUint(uint64(gid), 10),
+		UserID:    fmt.Sprintf("%016x", pid),
+	}
+	brut, err := json.Marshal(charge)
 	if err != nil {
 		return "", err
 	}
-	charge := base64.StdEncoding.EncodeToString(brut)
 
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(charge))
+	mac.Write(brut)
 
 	enveloppe, err := json.Marshal(eagleToken{
 		Payload:   charge,

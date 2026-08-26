@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Utility protocol. MK8 calls GetIntegerSettings right after registering; we
@@ -64,6 +65,39 @@ var utilityNbReglages = func() int {
 	return n
 }()
 
+// utilityValeursReglages : les VALEURS, cle par cle, sous forme "cle=valeur,cle=valeur".
+// Toute cle non citee vaut zero.
+//
+// POURQUOI. On rendait des zeros partout, en se disant que seul le NOMBRE d'entrees
+// comptait — c'est ce que la bissection montrait. Mais le serveur SMB35 de kinnay (AGPL,
+// lu pour les faits) garnit ces reglages de vraies valeurs : 60, 30, 90, 180 pour les
+// unes, 5, 3, 1 pour les autres. Ca ressemble a des DELAIS en secondes et a des comptes
+// de joueurs ou de manches.
+//
+// Or PAC-MAN 99 finit son compte a rebours et ne demarre rien. Un « delai avant depart »
+// ou un « minimum de joueurs » lu a zero produirait exactement ca. Reglable pour pouvoir
+// le verifier au lieu d'en debattre.
+var utilityValeursReglages = func() map[int]int32 {
+	out := map[int]int32{}
+	for _, part := range strings.Split(os.Getenv("NEX_UTILITY_VALEURS"), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		ki, err1 := strconv.Atoi(strings.TrimSpace(k))
+		vi, err2 := strconv.Atoi(strings.TrimSpace(v))
+		if err1 != nil || err2 != nil || ki < 0 || ki > 0xFFFF {
+			continue
+		}
+		out[ki] = int32(vi)
+	}
+	return out
+}()
+
 // UniqueIDInfo is the Utility structure returned by AcquireNexUniqueIDWithPassword:
 // the id plus the password the title stores alongside it.
 type UniqueIDInfo struct {
@@ -107,9 +141,10 @@ func UtilityHandler() RMCHandler {
 				out.U32(uint32(n))
 				for k := 0; k < n; k++ {
 					out.U16(uint16(k))
-					out.U32(0)
+					out.U32(uint32(utilityValeursReglages[k])) // absente = 0
 				}
-				fmt.Printf("[Utility] carte de reglages : %d entrees (cles 0..%d, valeur 0)\n", n, n-1)
+				fmt.Printf("[Utility] carte de reglages : %d entrees, valeurs non nulles=%v\n",
+					n, utilityValeursReglages)
 			} else {
 				out.U32(0) // empty Map<u16, ...>
 			}
