@@ -398,6 +398,23 @@ func (c *Connection) handlePacket(p *Packet) {
 		// a registered custom handler if any; otherwise ignore.
 		if h := c.Endpoint.customPacketHandlers[p.Type]; h != nil {
 			h(c, p)
+			return
+		}
+		// DERNIER ANGLE MORT DE LA PILE. Un type de paquet sans gestionnaire etait
+		// abandonne sans un mot — comme l'etait le RMC illisible juste au-dessus. Si la
+		// console parle et qu'on ignore, le symptome est identique a celui d'une console
+		// muette : elle attend, puis affiche une erreur de connexion.
+		//
+		// On l'annonce UNE FOIS PAR TYPE. Ces paquets peuvent arriver toutes les
+		// secondes ; une ligne a chaque fois noierait le journal et rendrait le reste
+		// illisible, ce qui reviendrait a ne rien journaliser du tout.
+		typesInconnusMu.Lock()
+		dejaVu := typesInconnus[p.Type]
+		typesInconnus[p.Type] = true
+		typesInconnusMu.Unlock()
+		if !dejaVu {
+			fmt.Printf("[PRUDP] type de paquet %d SANS GESTIONNAIRE (ignore) — charge=%do, drapeaux=0x%x\n",
+				p.Type, len(p.Payload), p.Flags)
 		}
 	}
 }
@@ -592,6 +609,28 @@ func (c *Connection) processPing(p *Packet) {
 func (c *Connection) dispatchRMC(payload []byte) {
 	req, err := ParseRMC(c.Settings, payload)
 	if err != nil || req.Mode != RMCRequest {
+		// CE RETOUR ETAIT MUET, et c'est le pire endroit du serveur pour l'etre : une
+		// requete qu'on ne sait pas analyser est abandonnee SANS reponse, donc la console
+		// attend jusqu'a expiration. A l'ecran cela donne « erreur de connexion » apres
+		// quelques secondes ; dans le journal, rien du tout — pas meme la ligne
+		// [Secure] proto=…, puisque le crochet OnRMC ne s'execute qu'apres cette analyse.
+		//
+		// C'est exactement la forme du blocage du multijoueur de SMM2 : le jeu se
+		// connecte, se prepare sans erreur, puis n'envoie plus rien de visible. On ne
+		// pouvait pas savoir s'il se taisait ou si on l'ignorait.
+		//
+		// On journalise donc, avec le debut de la charge : le protocole et la methode
+		// sont dans ses premiers octets, et c'est tout ce qu'il faut pour savoir quoi
+		// implementer.
+		n := len(payload)
+		if n > 64 {
+			n = 64
+		}
+		mode := "mode inattendu"
+		if err != nil {
+			mode = "analyse impossible: " + err.Error()
+		}
+		fmt.Printf("[RMC] requete ABANDONNEE (%s) len=%d debut=%x\n", mode, len(payload), payload[:n])
 		return
 	}
 	if c.Endpoint.OnRMC != nil {
@@ -599,6 +638,10 @@ func (c *Connection) dispatchRMC(payload []byte) {
 	}
 	handler, ok := c.Endpoint.handler(req.Protocol)
 	if !ok {
+		// Ici au moins une reponse part, donc la console n'attend pas — mais elle recoit
+		// NotImplemented sans qu'on sache lequel. On le dit.
+		fmt.Printf("[RMC] protocole 0x%02x NON ENREGISTRE (methode %d, call %d) -> NotImplemented\n",
+			req.Protocol, req.Method, req.CallID)
 		c.SendRMC(NewRMCError(c.Settings, req.Protocol, req.CallID, ResultCoreNotImplemented))
 		return
 	}
@@ -804,3 +847,9 @@ func equalBytes(a, b []byte) bool {
 	}
 	return true
 }
+
+// typesInconnus retient les types de paquets deja signales, pour n'en parler qu'une fois.
+var (
+	typesInconnusMu sync.Mutex
+	typesInconnus   = map[uint8]bool{}
+)

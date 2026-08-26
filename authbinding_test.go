@@ -37,13 +37,13 @@ func wrapAsExtraData(jwt string) []byte {
 	s := NewStreamOut(settings)
 	s.String("AuthenticationInfo") // DataHolder name
 	body := NewStreamOut(settings)
-	body.U8(1)               // structure version
-	body.U32(0)              // structure content length (placeholder)
-	body.String(jwt)         // Token (the id_token)
-	body.U32(3)              // NGSVersion
-	body.U8(1)               // TokenType
-	body.U32(40000)          // ServerVersion
-	s.Buffer(body.Bytes())   // DataHolder body, u32-length-prefixed
+	body.U8(1)             // structure version
+	body.U32(0)            // structure content length (placeholder)
+	body.String(jwt)       // Token (the id_token)
+	body.U32(3)            // NGSVersion
+	body.U8(1)             // TokenType
+	body.U32(40000)        // ServerVersion
+	s.Buffer(body.Bytes()) // DataHolder body, u32-length-prefixed
 	return s.Bytes()
 }
 

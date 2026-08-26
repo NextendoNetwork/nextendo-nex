@@ -10,19 +10,18 @@ import (
 // Nintendo, pour éprouver le décodage sans dépendre d'un profil réel — les vrais
 // sont des données nominatives et n'ont rien à faire dans un dépôt.
 func profilMK8(mii, pseudo string) []byte {
-	b := make([]byte, 132)
-	copy(b, commonDataMagic)
-	put := func(off int, s string, max int) {
-		for i, u := range utf16.Encode([]rune(s)) {
-			if off+i*2+1 >= len(b) || i*2 >= max {
-				return
-			}
-			b[off+i*2] = byte(u)
-			b[off+i*2+1] = byte(u >> 8)
+	b := make([]byte, commonDataBlobLen)
+	// Nom Mii : UTF-16LE a l'offset 20.
+	for i, u := range utf16.Encode([]rune(mii)) {
+		off := commonDataMiiNameOff + i*2
+		if off+1 >= commonDataMiiNameOff+commonDataMiiNameLen {
+			break
 		}
+		b[off] = byte(u)
+		b[off+1] = byte(u >> 8)
 	}
-	put(commonDataMiiNameOff, mii, commonDataMiiNameLen)
-	put(commonDataNickOff, pseudo, 40)
+	// Pseudo en jeu : un octet par caractere a l'offset 96, termine par 0.
+	copy(b[commonDataNickOff:commonDataBlobLen-1], []byte(pseudo))
 	return b
 }
 
@@ -42,20 +41,24 @@ func TestCommonDataNamesLitLesDeuxNoms(t *testing.T) {
 // Les noms non latins doivent survivre : une part des joueurs en utilise, et un
 // décodage qui les mutile rendrait la modération injuste pour eux seuls.
 func TestCommonDataNamesGardeLeNonLatin(t *testing.T) {
-	_, pseudo, ok := CommonDataNames(profilMK8("Mii", "アナキン"))
-	if !ok || pseudo != "アナキン" {
-		t.Fatalf("pseudo : %q ok=%v, attendu %q", pseudo, ok, "アナキン")
+	// Le nom Mii est en UTF-16 : c'est lui qui porte les alphabets non latins.
+	mii, _, ok := CommonDataNames(profilMK8("アナキン", "anakin"))
+	if !ok || mii != "アナキン" {
+		t.Fatalf("nom Mii : %q ok=%v, attendu %q", mii, ok, "アナキン")
 	}
 }
 
 // Le cas qui motive tout ce fichier : un client modifié qui ne dépose rien de
 // conforme. On doit le distinguer d'un profil ordinaire, pas l'avaler.
 func TestCommonDataNamesRefuseUnBlocNonConforme(t *testing.T) {
+	// Sur 4 371 profils releves en production, TOUS font 132 octets : c'est la
+	// taille qui distingue un bloc exploitable, pas une signature — les quatre
+	// premiers octets prennent au moins quatre valeurs differentes.
 	cas := map[string][]byte{
-		"vide":              nil,
-		"trop court":        make([]byte, 10),
-		"sans signature":    make([]byte, 132),
-		"signature altérée": append([]byte{0x52, 0x46, 0x01, 0x00}, make([]byte, 128)...),
+		"vide":       nil,
+		"trop court": make([]byte, 10),
+		"trop long":  make([]byte, 133),
+		"131 octets": make([]byte, 131),
 	}
 	for nom, blob := range cas {
 		if _, _, ok := CommonDataNames(blob); ok {

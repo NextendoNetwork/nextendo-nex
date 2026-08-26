@@ -10,14 +10,14 @@ func TestClassifyNAT(t *testing.T) {
 		natMap, natFilter uint32
 		want              natClass
 	}{
-		{0, 0, natUnknown},   // not reported yet
-		{1, 0, natOpen},      // endpoint-independent mapping + filter
-		{1, 1, natOpen},      //
-		{1, 2, natModerate},  // filter tighter than mapping
-		{0, 2, natModerate},  // map<=1 but filter high
-		{2, 1, natStrict},    // address/port-dependent mapping = symmetric-ish
-		{2, 2, natStrict},    //
-		{3, 3, natStrict},    //
+		{0, 0, natUnknown},  // not reported yet
+		{1, 0, natOpen},     // endpoint-independent mapping + filter
+		{1, 1, natOpen},     //
+		{1, 2, natModerate}, // filter tighter than mapping
+		{0, 2, natModerate}, // map<=1 but filter high
+		{2, 1, natStrict},   // address/port-dependent mapping = symmetric-ish
+		{2, 2, natStrict},   //
+		{3, 3, natStrict},   //
 	}
 	for _, c := range cases {
 		if got := classifyNAT(c.natMap, c.natFilter); got != c.want {
@@ -30,16 +30,16 @@ func TestNATCompatible(t *testing.T) {
 	// The only combinations that must be REFUSED are the ones that reliably fail to
 	// hole-punch: strict×strict and strict×moderate. Unknown is always optimistic.
 	compat := map[[2]natClass]bool{
-		{natUnknown, natStrict}:   true, // fail-open: don't isolate before we know
-		{natStrict, natUnknown}:   true,
-		{natOpen, natStrict}:      true, // an open NAT can still reach a symmetric one
-		{natStrict, natOpen}:      true,
-		{natOpen, natOpen}:        true,
-		{natOpen, natModerate}:    true,
+		{natUnknown, natStrict}:    true, // fail-open: don't isolate before we know
+		{natStrict, natUnknown}:    true,
+		{natOpen, natStrict}:       true, // an open NAT can still reach a symmetric one
+		{natStrict, natOpen}:       true,
+		{natOpen, natOpen}:         true,
+		{natOpen, natModerate}:     true,
 		{natModerate, natModerate}: true,
-		{natStrict, natModerate}:  false, // <- the poisoning pairs
-		{natModerate, natStrict}:  false,
-		{natStrict, natStrict}:    false,
+		{natStrict, natModerate}:   false, // <- the poisoning pairs
+		{natModerate, natStrict}:   false,
+		{natStrict, natStrict}:     false,
 	}
 	for pair, want := range compat {
 		if got := natCompatible(pair[0], pair[1]); got != want {

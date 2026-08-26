@@ -92,3 +92,40 @@ func TestIsPrivateIPUsesRealRanges(t *testing.T) {
 		}
 	}
 }
+
+// TestConnectivity ne porte ni parametres ni valeur de retour. Le client de kinnay
+// lit la reponse puis exige stream.eof() : un seul octet de trop la ferait echouer.
+// Le corps VIDE fait donc partie du contrat, pas du hasard — d'ou ce test.
+func TestSecureConnectionTestConnectivityRepondVide(t *testing.T) {
+	s := testSettings()
+	ep := NewEndpoint(s)
+	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
+	conn.PID = 1800000000
+
+	req := NewRMCRequest(s, ProtocolSecureConnection, MethodTestConnectivity, 7, nil)
+	resp := SecureConnectionHandler()(conn, req)
+
+	if resp.IsError {
+		t.Fatalf("TestConnectivity a echoue : %+v", resp)
+	}
+	if len(resp.Body) != 0 {
+		t.Fatalf("corps de %d octets, il doit etre vide (le client exige eof)", len(resp.Body))
+	}
+	if resp.Method != MethodTestConnectivity {
+		t.Fatalf("methode %d dans la reponse, attendu %d", resp.Method, MethodTestConnectivity)
+	}
+}
+
+// Le cas qui a motive le correctif : avant, cette methode tombait dans le default et
+// le serveur repondait "non implementee" a une question legitime. On verifie qu'une
+// methode REELLEMENT inconnue continue, elle, d'etre refusee.
+func TestSecureConnectionMethodeInconnueRefusee(t *testing.T) {
+	s := testSettings()
+	ep := NewEndpoint(s)
+	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
+
+	req := NewRMCRequest(s, ProtocolSecureConnection, 0x63, 8, nil)
+	if resp := SecureConnectionHandler()(conn, req); !resp.IsError {
+		t.Fatal("une methode inconnue doit etre refusee, pas acceptee en silence")
+	}
+}

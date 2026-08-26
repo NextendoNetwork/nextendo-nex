@@ -62,6 +62,30 @@ func (s *StreamOut) String(str string) {
 	s.Write(data)
 }
 
+// StringVideZero writes a NEX String, but encodes an EMPTY string as length 0 with no
+// bytes at all — where String would write length 1 and a lone null terminator.
+//
+// MESURE, PAS SUPPOSE. Le serveur d'Open Course World fait ce choix explicitement, et
+// ses lignes commentees montrent qu'il a d'abord essaye l'autre : il ecrivait
+// uint16(1) + 0x00, puis s'est arrete sur uint16(0). Un octet d'ecart, et c'est le seul
+// qui separait notre UserInfo du sien apres comparaison octet par octet.
+//
+// POURQUOI UNE METHODE A PART ET NON UNE CORRECTION DE String. String est employe par
+// les NEUF jeux, et les huit autres fonctionnent aujourd'hui. Ou bien ils n'envoient
+// jamais de chaine vide, ou bien la console tolere les deux formes dans ces
+// contextes-la — on ne le sait pas, et le savoir demande de les tester un par un. En
+// attendant, on corrige la ou on a mesure le probleme sans toucher a ce qui marche.
+//
+// A verifier plus tard : si la convention est generale, String est faux partout et le
+// defaut est simplement latent.
+func (s *StreamOut) StringVideZero(str string) {
+	if str == "" {
+		s.U16(0)
+		return
+	}
+	s.String(str)
+}
+
 // Buffer writes a u32-length-prefixed byte blob.
 func (s *StreamOut) Buffer(b []byte) { s.U32(uint32(len(b))); s.Write(b) }
 
