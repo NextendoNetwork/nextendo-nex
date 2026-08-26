@@ -2,6 +2,7 @@ package nex
 
 import (
 	"crypto/rand"
+	"os"
 	"sync/atomic"
 )
 
@@ -42,7 +43,17 @@ func (n *NotificationEvent) Levels() []Level {
 			o.U32(n.Type)
 			o.U64(n.Param1)
 			o.U64(n.Param2)
-			o.String(n.StrParam)
+			// La chaine VIDE : longueur 1 + terminateur (String) ou longueur 0
+			// (StringVideZero) ? MK8 et les autres acceptent la premiere forme, mais ils ne
+			// dependent d'aucun envoi du serveur — PAC-MAN 99 est le premier titre ou nous
+			// POUSSONS, et il ignore tout ce qu'on lui envoie. Un octet de trop ici decale
+			// tout ce qui suit et l'evenement devient illisible, en silence.
+			// Pilote par NEX_NOTIF_STRVIDE0=1 pour trancher sans casser les autres jeux.
+			if notifStrVideZero {
+				o.StringVideZero(n.StrParam)
+			} else {
+				o.String(n.StrParam)
+			}
 			o.U64(n.Param3)
 		},
 		Load: func(i *StreamIn) {
@@ -55,6 +66,9 @@ func (n *NotificationEvent) Levels() []Level {
 		},
 	}}
 }
+
+// notifStrVideZero : voir le commentaire dans Levels().
+var notifStrVideZero = os.Getenv("NEX_NOTIF_STRVIDE0") == "1"
 
 var notifCallCounter uint32
 

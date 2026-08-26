@@ -156,6 +156,11 @@ type Matchmaking struct {
 
 	notif      *notifStore
 	mu         sync.Mutex
+	// OnSessionReady, s il est pose, est appele apres chaque AutoMatchmake reussi avec
+	// le salon et ses participants. Sert a PAC-MAN 99 pour envoyer la passation Eagle ;
+	// nil — le defaut — laisse tous les autres titres inchanges.
+	OnSessionReady func(gid uint32, participants []uint64)
+
 	gatherings map[uint32]*gathering
 	byCode     map[string]uint32
 	nextGID    uint32
@@ -472,6 +477,12 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 	}
 	fmt.Printf("[MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
 		gid, caller.PID, count, count-1, participants)
+
+	// Le salon vient de bouger : PAC-MAN 99 attend ici l'adresse du relais Eagle. Hors de
+	// ce titre le rappel est nil et rien ne change.
+	if m.OnSessionReady != nil {
+		m.OnSessionReady(gid, participants)
+	}
 }
 
 // [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to

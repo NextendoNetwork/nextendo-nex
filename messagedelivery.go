@@ -1,6 +1,9 @@
 package nex
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // Message Delivery (protocole 27). UNE seule methode : DeliverMessage.
 //
@@ -16,6 +19,19 @@ const (
 	ProtocolMessageDelivery uint16 = 0x1B
 	MethodDeliverMessage    uint32 = 0x01
 )
+
+// relaiInclutSource : renvoyer aussi le message A SON EXPEDITEUR.
+//
+// On l'excluait, en se disant qu'il connait deja ce qu'il vient d'ecrire. MESURE DU
+// 2026-08-26 : dans PAC-MAN 99 le CREATEUR du salon reste bloque a 0 pendant que les
+// autres voient un compte — asymetrie exactement compatible avec un jeu qui affiche non
+// pas ce qu'il a calcule, mais ce que le SERVEUR lui renvoie. Exclu de sa propre
+// diffusion, l'hote n'apprend donc jamais rien.
+//
+// Le protocole Eagle connait les deux modes (« tous sauf la source » et « tous, source
+// comprise »), donc renvoyer a l'expediteur n'est pas un bricolage.
+// Pilote par NEX_RELAI_INCLUT_SOURCE=1.
+var relaiInclutSource = os.Getenv("NEX_RELAI_INCLUT_SOURCE") == "1"
 
 // MessageDeliveryHandler relaie DeliverMessage aux autres participants du salon de
 // l'appelant. Le corps est retransmis TEL QUEL : le serveur n'a pas a comprendre le
@@ -57,8 +73,8 @@ func (m *Matchmaking) MessageDeliveryHandler() RMCHandler {
 
 		relayes := 0
 		for _, pid := range destinataires {
-			if pid == conn.PID {
-				continue // l'expediteur connait deja son propre message
+			if pid == conn.PID && !relaiInclutSource {
+				continue
 			}
 			c := conn.Endpoint.FindConnectionByPID(pid)
 			if c == nil {

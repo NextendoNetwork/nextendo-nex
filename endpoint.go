@@ -34,6 +34,9 @@ var fragmentPacing = func() time.Duration {
 // reassembling, and the duplicates corrupt/reset its reassembly.
 var retransmitInterval = 2 * time.Second
 
+// notifDiagRetransmit active la trace de reemission ci-dessous (NEX_DIAG_RETRANSMIT=1).
+var notifDiagRetransmit = os.Getenv("NEX_DIAG_RETRANSMIT") == "1"
+
 // RMCHandler processes a decoded RMC request and returns the response to send
 // back (built with NewRMCSuccess / NewRMCError), or nil to send nothing.
 type RMCHandler func(conn *Connection, req *RMCMessage) *RMCMessage
@@ -791,6 +794,15 @@ func (c *Connection) retransmitLoop() {
 			batch = append(batch, enc)
 		}
 		c.pendingMu.Unlock()
+
+		// DIAGNOSTIC. Un paquet fiable que la console n'acquitte JAMAIS reste ici et se
+		// reemet indefiniment : le compteur ne redescend pas. C'est ainsi qu'on distingue
+		// « la console n'a pas recu » de « la console a recu et a ignore » — question
+		// ouverte pour les notifications de PAC-MAN 99, qu'il ne semble pas traiter.
+		if notifDiagRetransmit {
+			fmt.Printf("[PRUDP diag] pid=%d : %d paquet(s) fiable(s) non acquitte(s), reemission\n",
+				c.PID, len(batch))
+		}
 		for _, enc := range batch {
 			c.mu.Lock()
 			c.send(enc)
