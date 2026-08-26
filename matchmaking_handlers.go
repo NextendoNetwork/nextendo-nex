@@ -14,13 +14,13 @@ const (
 	ProtocolMatchMakingExt     uint16 = 0x32
 
 	// MatchMaking (0x15)
-	MethodUnregisterGathering uint32 = 0x02
-	MethodFindBySingleID15    uint32 = 0x15
-	MethodUpdateSessionURL    uint32 = 0x1B
-	MethodUpdateSessionHostV1 uint32 = 0x28
+	MethodUnregisterGathering     uint32 = 0x02
+	MethodFindBySingleID15        uint32 = 0x15
+	MethodUpdateSessionURL        uint32 = 0x1B
+	MethodUpdateSessionHostV1     uint32 = 0x28
 	MethodGetDetailedParticipants uint32 = 0x0F
 	MethodGetSessionURLs          uint32 = 0x29
-	MethodUpdateSessionHost   uint32 = 0x2A
+	MethodUpdateSessionHost       uint32 = 0x2A
 
 	// Splatfest TEAM battles combine two full 4-player teams by MIGRATING gathering ownership
 	// (kinnay MatchMaking 0x15: 43 UpdateGatheringOwnership, 44 MigrateGatheringOwnership, and
@@ -154,12 +154,27 @@ type Matchmaking struct {
 	// publish themselves are unchanged.
 	OnFriendSessionCreated func(pid uint64, gid uint32)
 
-	notif      *notifStore
-	mu         sync.Mutex
+	notif *notifStore
+	mu    sync.Mutex
 	// OnSessionReady, s il est pose, est appele apres chaque AutoMatchmake reussi avec
 	// le salon et ses participants. Sert a PAC-MAN 99 pour envoyer la passation Eagle ;
 	// nil — le defaut — laisse tous les autres titres inchanges.
 	OnSessionReady func(gid uint32, participants []uint64)
+
+	// NotifierDeparts previent le PROPRIETAIRE du salon quand un participant s'en va.
+	//
+	// Sans cet avis, sa liste de joueurs ne DIMINUE jamais : elle accumule tous ceux qui
+	// sont partis sans se deconnecter proprement. MESURE DU 2026-08-26 : dans SUPER MARIO
+	// BROS. 35, l'hote annoncait DOUZE joueurs a un salon ou six consoles seulement
+	// atteignaient le relais — les autres attendaient six absents et abandonnaient.
+	//
+	// Opt-in : nil chez les autres titres, qui tournent tres bien sans depuis des mois et
+	// qu'on ne touche pas a cette heure-ci.
+	NotifierDeparts bool
+
+	// Endpoint sert a joindre le proprietaire d'un salon depuis RemovePlayer, qui ne
+	// recoit qu'un PID. Pose par le serveur de jeu en meme temps que NotifierDeparts.
+	Endpoint *Endpoint
 
 	gatherings map[uint32]*gathering
 	byCode     map[string]uint32
@@ -1204,8 +1219,23 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 	// ligne — exactement le genre de trace fantôme que l'éviction des connexions corrige.
 	m.notif.forget(pid)
 
+	// On collecte les avis a emettre SOUS le verrou, et on les envoie APRES l'avoir
+	// relache : SendRMC ecrit sur une socket et peut bloquer, et tenir m.mu pendant ce
+	// temps gelerait tout le matchmaking pour les autres joueurs.
+	type avis struct {
+		conn *Connection
+		gid  uint32
+	}
+	var aPrevenir []avis
+
+	type migration struct {
+		gid             uint32
+		ancien, nouveau uint64
+		participants    []uint64
+	}
+	var aMigrer []migration
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for gid, g := range m.gatherings {
 		if g == nil || g.session == nil {
 			continue
@@ -1215,8 +1245,8 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 		if len(g.participants) == before {
 			continue // not in this gathering
 		}
-		// The owner leaving kills the lobby: it is theirs, and nothing here migrates a host.
-		if len(g.participants) == 0 || g.session.Gathering.OwnerPID == pid {
+		// Salon vide : il n'y a plus rien a garder.
+		if len(g.participants) == 0 {
 			delete(m.gatherings, gid)
 			if g.code != "" {
 				delete(m.byCode, g.code)
@@ -1224,8 +1254,81 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 			fmt.Printf("[MM] disconnect pid=%d -> gathering %d removed\n", pid, gid)
 			continue
 		}
+
+		// LE PROPRIETAIRE PART, MAIS IL RESTE DU MONDE.
+		//
+		// On DETRUISAIT le salon, ce qui ejectait tous les autres avec lui. Symptome dans
+		// SUPER MARIO BROS. 35 : l'hote s'en va et trois ou quatre consoles tombent dans
+		// les 80 millisecondes qui suivent — pas chacune de son cote, mais parce qu'on leur
+		// retirait la partie sous les pieds.
+		//
+		// Le vrai service MIGRE : il choisit un successeur parmi ceux qui restent et
+		// previent tout le salon (type 4000). Le drapeau 0x10 dit si le titre l'autorise ;
+		// SMB35 le pose (flags=0x210).
+		if g.session.Gathering.OwnerPID == pid {
+			if !m.NotifierDeparts || g.session.Gathering.Flags&0x10 == 0 {
+				delete(m.gatherings, gid)
+				if g.code != "" {
+					delete(m.byCode, g.code)
+				}
+				fmt.Printf("[MM] disconnect pid=%d -> gathering %d removed (pas de migration)\n", pid, gid)
+				continue
+			}
+			ancien := g.session.Gathering.OwnerPID
+			nouveau := g.participants[0]
+			g.session.Gathering.OwnerPID = nouveau
+			g.session.Gathering.HostPID = nouveau
+			if m.Endpoint != nil {
+				if c := m.Endpoint.FindConnectionByID(g.hostConnID); c != nil {
+					_ = c
+				}
+			}
+			aMigrer = append(aMigrer, migration{gid: gid, ancien: ancien, nouveau: nouveau,
+				participants: append([]uint64(nil), g.participants...)})
+			fmt.Printf("[MM] proprietaire pid=%d parti -> salon %d migre vers pid=%d\n", pid, gid, nouveau)
+		}
 		g.session.NumParticipants = uint32(len(g.participants))
 		fmt.Printf("[MM] disconnect pid=%d -> left gathering %d (%d left)\n", pid, gid, len(g.participants))
+
+		// Le proprietaire tient la liste des joueurs de la partie : s'il n'apprend pas les
+		// departs, elle ne fait que grossir.
+		if m.NotifierDeparts {
+			if m.Endpoint != nil {
+				if c := m.Endpoint.FindConnectionByPID(g.session.Gathering.OwnerPID); c != nil {
+					aPrevenir = append(aPrevenir, avis{conn: c, gid: gid})
+				}
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	// La migration se signale a TOUT le salon : chacun doit savoir qui commande.
+	for _, mg := range aMigrer {
+		for _, p := range mg.participants {
+			if m.Endpoint == nil {
+				break
+			}
+			c := m.Endpoint.FindConnectionByPID(p)
+			if c == nil {
+				continue
+			}
+			SendNotification(c, &NotificationEvent{
+				PIDSource: mg.ancien,
+				Type:      NotificationOwnershipChanged,
+				Param1:    uint64(mg.gid),
+				Param2:    mg.nouveau,
+			})
+		}
+	}
+
+	for _, a := range aPrevenir {
+		SendNotification(a.conn, &NotificationEvent{
+			PIDSource: pid,
+			Type:      NotificationParticipantDisconnected,
+			Param1:    uint64(a.gid),
+			Param2:    pid,
+		})
+		fmt.Printf("[MM] depart de pid=%d signale au proprietaire du salon %d\n", pid, a.gid)
 	}
 }
 
@@ -1341,7 +1444,6 @@ func isTournamentIDList(body []byte) bool {
 	n := uint32(body[0]) | uint32(body[1])<<8 | uint32(body[2])<<16 | uint32(body[3])<<24
 	return n > 0 && n <= 4096 && int(n)*4+4 == len(body)
 }
-
 
 // ParticipantDetails : une entree de la liste rendue par GetDetailedParticipants
 // (MatchMaking 0x15, methode 15). Structure documentee par kinnay :

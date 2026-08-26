@@ -19,7 +19,9 @@ const (
 	MethodRanking2GetCommonData      uint32 = 2
 	MethodRanking2PutCommonData      uint32 = 3
 	MethodRanking2DelCommonData      uint32 = 4
+	MethodRanking2GetRanking         uint32 = 5
 	MethodRanking2GetCategorySetting uint32 = 7
+	MethodRanking2GetEstimateMyRank  uint32 = 11
 )
 
 // Ranking2CategorySetting decrit une categorie de classement : les bornes de score, le
@@ -105,6 +107,24 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			r.mu.Unlock()
 
 			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, nil)
+
+		case MethodRanking2GetRanking:
+			// Classement VIDE. On n'en tient pas encore, et rendre une liste vide est la
+			// reponse honnete : le jeu affiche un tableau sans entrees au lieu d'attendre.
+			out := NewStreamOut(conn.Settings)
+			out.U32(0) // nombre d'entrees
+			fmt.Printf("[Ranking2] classement vide rendu a pid=%d\n", conn.PID)
+
+			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
+
+		case MethodRanking2GetEstimateMyRank:
+			// Rang estime : personne n'est classe, donc le joueur est premier sur zero.
+			out := NewStreamOut(conn.Settings)
+			out.U32(1) // rang
+			out.U32(0) // total de classes
+			fmt.Printf("[Ranking2] rang estime rendu a pid=%d\n", conn.PID)
+
+			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
 
 		case MethodRanking2GetCategorySetting:
 			// Le corps ne porte que le numero de categorie. On rend une categorie SANS

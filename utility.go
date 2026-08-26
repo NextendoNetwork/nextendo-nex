@@ -26,6 +26,7 @@ const (
 	// de demander LEQUEL est le sien, juste apres Register. Sans reponse, la console
 	// recommence tout le cycle connexion / Register / question sans jamais avancer —
 	// vu comme 2306-0502 a l'ecran, alors que l'authentification, elle, avait reussi.
+	MethodAssociateNexUniqueIDWithMyPrincipalID     uint32 = 0x3
 	MethodGetAssociatedNexUniqueIDWithMyPrincipalID uint32 = 0x5
 )
 
@@ -172,6 +173,14 @@ func UtilityHandler() RMCHandler {
 			fmt.Printf("[Utility] AcquireNexUniqueIDWithPassword pid=%d -> uid=%d (+pw)\n", conn.PID, conn.PID)
 
 			return NewRMCSuccess(conn.Settings, ProtocolUtility, req.Method, req.CallID, out.Bytes())
+
+		case MethodAssociateNexUniqueIDWithMyPrincipalID:
+			// Le titre ASSOCIE un id unique a son compte. Nos ids etant DERIVES du PID, il
+			// n'y a rien a enregistrer : l'association est deja vraie par construction. On
+			// acquitte pour ne pas le laisser attendre.
+			fmt.Printf("[Utility] AssociateNexUniqueID pid=%d (%d o, deja implicite)\n", conn.PID, len(req.Body))
+
+			return NewRMCSuccess(conn.Settings, ProtocolUtility, req.Method, req.CallID, nil)
 
 		case MethodGetAssociatedNexUniqueIDWithMyPrincipalID:
 			// Meme reponse que l'acquisition avec mot de passe : nos ids sont DERIVES du PID,

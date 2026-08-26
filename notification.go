@@ -15,11 +15,13 @@ const (
 // Notification event type ids (category*1000 + subtype). These are what the
 // console's Pia WaitNotification blocks on after matchmaking.
 const (
-	NotificationParticipate           uint32 = 3001   // ParticipationEvent.Participate — the pairing unblock
-	NotificationEndParticipation      uint32 = 3008   // ParticipationEvent.EndParticipation
-	NotificationAddedToGathering      uint32 = 122000 // to a newly-added (non-caller) participant
-	NotificationGatheringUnregistered uint32 = 109000 // gathering torn down
-	NotificationHostChanged           uint32 = 110000 // host migrated
+	NotificationParticipate             uint32 = 3001   // ParticipationEvent.Participate — the pairing unblock
+	NotificationParticipantDisconnected uint32 = 3007   // ParticipationEvent.Disconnected
+	NotificationEndParticipation        uint32 = 3008   // ParticipationEvent.EndParticipation
+	NotificationOwnershipChanged        uint32 = 4000   // le salon change de proprietaire
+	NotificationAddedToGathering        uint32 = 122000 // to a newly-added (non-caller) participant
+	NotificationGatheringUnregistered   uint32 = 109000 // gathering torn down
+	NotificationHostChanged             uint32 = 110000 // host migrated
 )
 
 // NotificationEvent is the payload of ProcessNotificationEvent (NEX 4.0). It is
