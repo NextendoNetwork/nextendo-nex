@@ -1,6 +1,10 @@
 package nex
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strconv"
+)
 
 // Utility protocol. MK8 calls GetIntegerSettings right after registering; we
 // return empty setting maps, which is enough to unblock the connection sequence.
@@ -16,6 +20,12 @@ const (
 	// lost when the games moved to this core.
 	MethodAcquireNexUniqueID             uint32 = 0x1
 	MethodAcquireNexUniqueIDWithPassword uint32 = 0x2
+
+	// PAC-MAN 99 ne demande PAS d'id : il suppose qu'il en existe deja un et se contente
+	// de demander LEQUEL est le sien, juste apres Register. Sans reponse, la console
+	// recommence tout le cycle connexion / Register / question sans jamais avancer —
+	// vu comme 2306-0502 a l'ecran, alors que l'authentification, elle, avait reussi.
+	MethodGetAssociatedNexUniqueIDWithMyPrincipalID uint32 = 0x5
 )
 
 // nexUniqueIDPasswordSalt derives a unique-id password from the id itself.
@@ -25,6 +35,34 @@ const (
 // authenticated by its Kerberos ticket before any of this runs. Same constant as the
 // nex-go stack, so an account that acquired its id there keeps working here.
 const nexUniqueIDPasswordSalt uint64 = 0x4e45585f50574421
+
+// utilitySondePeuplee : commutateur de l experience ci-dessus, pilote par NEX_UTILITY_SONDE=1.
+// utilityNbReglages : NOMBRE d'entrees rendues par GetIntegerSettings (cles 0..n-1,
+// valeur 0). Zero — le defaut — rend une carte VIDE : c'est le comportement historique,
+// suffisant pour MK8 et les autres, et on ne le change pas sous leurs pieds.
+//
+// MESURE DU 2026-08-26, PAC-MAN 99, par bissection sur une vraie console :
+//
+//	carte vide       -> le jeu se tait apres GetIntegerSettings, aucun matchmaking
+//	cles 0..15  (16) -> pareil
+//	cles 0..19  (20) -> pareil
+//	cles 0..20  (21) -> pareil
+//	cles 0..21  (22) -> AutoMatchmake enchaine, salon cree, jeu en attente de joueurs
+//	la SEULE cle 21  -> ECHEC
+//
+// Le dernier essai est le plus parlant : fournir la cle 21 isolement ne suffit pas, mais
+// la fournir en 22e position suffit. Le client ne fait donc PAS une recherche par cle — il
+// lit une POSITION. La valeur, elle, est indifferente : des zeros passent.
+//
+// On ignore ce que ce reglage represente ; on sait seulement que le jeu refuse d'avancer
+// sans lui. A remplacer si un jour une capture du vrai service en donne le contenu reel.
+var utilityNbReglages = func() int {
+	n, err := strconv.Atoi(os.Getenv("NEX_UTILITY_REGLAGES"))
+	if err != nil || n < 0 || n > 4096 {
+		return 0
+	}
+	return n
+}()
 
 // UniqueIDInfo is the Utility structure returned by AcquireNexUniqueIDWithPassword:
 // the id plus the password the title stores alongside it.
@@ -47,8 +85,36 @@ func UtilityHandler() RMCHandler {
 	return func(conn *Connection, req *RMCMessage) *RMCMessage {
 		switch req.Method {
 		case MethodGetIntegerSettings, MethodGetStringSettings:
+			// On JOURNALISE l'index demande. La reponse « carte vide » suffit a MK8 mais pas a
+			// PAC-MAN 99, qui repart en boucle apres l'avoir recue : sans savoir QUEL groupe de
+			// reglages il reclame, on ne peut que deviner. Le parametre est un Uint32 unique
+			// (index), donc un corps plus court signifie qu'on a mal lu la requete.
+			idx := int64(-1)
+			if len(req.Body) >= 4 {
+				idx = int64(NewStreamIn(req.Body, conn.Settings).U32())
+			}
+			fmt.Printf("[Utility] settings method=%d index=%d bodyLen=%d -> carte vide\n",
+				req.Method, idx, len(req.Body))
+
+			// EXPERIENCE : la carte VIDE suffit a MK8 mais laisse PAC-MAN 99 s arreter net apres
+			// l avoir recue, sans plus rien emettre. On ignore quelles cles il lit — les noms de
+			// methode NEX ne sont pas des chaines dans le binaire et les vtables n y sont pas
+			// resolues. On repond donc une carte PEUPLEE pour trancher UNE question : le contenu
+			// compte-t-il ? Si le comportement ne bouge pas, le mur est ailleurs.
+			// A RETIRER ensuite : c est une sonde, pas une implementation.
 			out := NewStreamOut(conn.Settings)
-			out.U32(0) // empty Map<u16, ...>
+			if n := utilityNbReglages; req.Method == MethodGetIntegerSettings && n > 0 {
+				out.U32(uint32(n))
+				for k := 0; k < n; k++ {
+					out.U16(uint16(k))
+					out.U32(0)
+				}
+				fmt.Printf("[Utility] carte de reglages : %d entrees (cles 0..%d, valeur 0)\n", n, n-1)
+			} else {
+				out.U32(0) // empty Map<u16, ...>
+			}
+			fmt.Printf("[Utility] reponse method=%d callID=%d corps=% x\n", req.Method, req.CallID, out.Bytes())
+
 			return NewRMCSuccess(conn.Settings, ProtocolUtility, req.Method, req.CallID, out.Bytes())
 
 		case MethodAcquireNexUniqueID:
@@ -69,6 +135,20 @@ func UtilityHandler() RMCHandler {
 				NEXUniqueIDPassword: uint64(conn.PID) ^ nexUniqueIDPasswordSalt,
 			})
 			fmt.Printf("[Utility] AcquireNexUniqueIDWithPassword pid=%d -> uid=%d (+pw)\n", conn.PID, conn.PID)
+
+			return NewRMCSuccess(conn.Settings, ProtocolUtility, req.Method, req.CallID, out.Bytes())
+
+		case MethodGetAssociatedNexUniqueIDWithMyPrincipalID:
+			// Meme reponse que l'acquisition avec mot de passe : nos ids sont DERIVES du PID,
+			// jamais alloues, donc la consultation ne peut pas trouver autre chose que ce que
+			// l'acquisition aurait rendu — il n'y a rien a stocker et donc rien qui puisse
+			// manquer pour un compte qui n'est jamais passe par l'acquisition.
+			out := NewStreamOut(conn.Settings)
+			out.Add(&UniqueIDInfo{
+				NEXUniqueID:         uint64(conn.PID),
+				NEXUniqueIDPassword: uint64(conn.PID) ^ nexUniqueIDPasswordSalt,
+			})
+			fmt.Printf("[Utility] GetAssociatedNexUniqueIDWithMyPrincipalID pid=%d -> uid=%d (+pw)\n", conn.PID, conn.PID)
 
 			return NewRMCSuccess(conn.Settings, ProtocolUtility, req.Method, req.CallID, out.Bytes())
 

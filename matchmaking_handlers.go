@@ -18,7 +18,8 @@ const (
 	MethodFindBySingleID15    uint32 = 0x15
 	MethodUpdateSessionURL    uint32 = 0x1B
 	MethodUpdateSessionHostV1 uint32 = 0x28
-	MethodGetSessionURLs      uint32 = 0x29
+	MethodGetDetailedParticipants uint32 = 0x0F
+	MethodGetSessionURLs          uint32 = 0x29
 	MethodUpdateSessionHost   uint32 = 0x2A
 
 	// Splatfest TEAM battles combine two full 4-player teams by MIGRATING gathering ownership
@@ -105,6 +106,24 @@ type Matchmaking struct {
 	// entre amis ; Smash n'appelle cette méthode qu'au démarrage et attend une liste vide,
 	// donc le défaut (false) préserve son comportement actuel.
 	FindByParticipantEnabled bool
+	// FindByParticipantVideVeutDireToutes : une liste de PID VIDE dans
+	// FindMatchmakeSessionByParticipant signifie « n'importe quelle session ouverte »
+	// et non « aucune ».
+	//
+	// MESURE DU 2026-08-24, SMM2 en cooperatif : le jeu envoie `pids=[]`. L'ancienne
+	// implementation bouclait sur cette liste, donc elle rendait zero session quoi qu'il
+	// arrive — deux joueurs entrant EN MEME TEMPS creaient chacun sa salle et ne se
+	// voyaient jamais. Le drapeau FindByParticipantEnabled ne pouvait rien y changer :
+	// il n'y avait rien a parcourir.
+	//
+	// C'est la meme convention que le reste de ce protocole, rencontree deux fois le
+	// meme soir : liste vide = joker. Dans GetUsers elle veut dire « mon profil », dans
+	// SearchCoursesPostedBy « mes niveaux », ici « toutes celles ou je peux entrer ».
+	//
+	// Le drapeau est separe parce qu'Animal Crossing active FindByParticipantEnabled
+	// pour la visite d'ile ENTRE AMIS : il envoie de vrais PID, et lui rendre un jour
+	// une liste ouverte ferait atterrir un visiteur sur l'ile d'un inconnu.
+	FindByParticipantVideVeutDireToutes bool
 	// SessionPartPersists fait ÉCRIRE les mises à jour partielles de session (0x6D.0x2C)
 	// au lieu de simplement les acquitter. Animal Crossing y envoie le « Dodo Code » de
 	// l'hôte ; Splatoon 2 n'appelle cette méthode qu'en fin de partie coop, où seul
@@ -238,6 +257,8 @@ func (m *Matchmaking) MatchMakingHandler() RMCHandler {
 		switch req.Method {
 		case MethodGetSessionURLs:
 			return m.getSessionURLs(conn, req)
+		case MethodGetDetailedParticipants:
+			return m.getDetailedParticipants(conn, req)
 		case MethodUnregisterGathering:
 			m.unregister(conn, req)
 			return boolResponse(conn, ProtocolMatchMaking, req, true)
@@ -1308,4 +1329,65 @@ func isTournamentIDList(body []byte) bool {
 	}
 	n := uint32(body[0]) | uint32(body[1])<<8 | uint32(body[2])<<16 | uint32(body[3])<<24
 	return n > 0 && n <= 4096 && int(n)*4+4 == len(body)
+}
+
+
+// ParticipantDetails : une entree de la liste rendue par GetDetailedParticipants
+// (MatchMaking 0x15, methode 15). Structure documentee par kinnay :
+// PID + nom + message + nombre de participants.
+type ParticipantDetails struct {
+	IDParticipant uint64
+	Name          string
+	Message       string
+	Participants  uint16
+}
+
+// Levels implements Structure.
+func (p *ParticipantDetails) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.PID(p.IDParticipant)
+			o.String(p.Name)
+			o.String(p.Message)
+			o.U16(p.Participants)
+		},
+		Load: func(i *StreamIn) {
+			p.IDParticipant = i.PID()
+			p.Name = i.String()
+			p.Message = i.String()
+			p.Participants = i.U16()
+		},
+	}}
+}
+
+// getDetailedParticipants repond a MatchMaking 0x0F. PAC-MAN 99 l appelle JUSTE APRES
+// AutoMatchmake : il vient d entrer dans la salle et demande qui s y trouve. Sans reponse
+// il s arrete sur 2306-0103, salle creee mais partie jamais lancee.
+//
+// Le nom et le message restent vides : le serveur ne connait ici que des PID, et le jeu
+// affiche de toute facon le pseudo que chaque console porte elle-meme. Si un client se
+// revele exigeant sur ces champs, c est la premiere chose a regarder.
+func (m *Matchmaking) getDetailedParticipants(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	gid := NewStreamIn(req.Body, s).U32()
+
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	var pids []uint64
+	if g != nil {
+		pids = append(pids, g.participants...)
+	}
+	m.mu.Unlock()
+
+	out := NewStreamOut(s)
+	out.U32(uint32(len(pids)))
+	for _, pid := range pids {
+		out.Add(&ParticipantDetails{
+			IDParticipant: pid,
+			Participants:  1,
+		})
+	}
+	fmt.Printf("[MM] getDetailedParticipants gid=%d -> %d participant(s)\n", gid, len(pids))
+
+	return NewRMCSuccess(s, ProtocolMatchMaking, req.Method, req.CallID, out.Bytes())
 }
