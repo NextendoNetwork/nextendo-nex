@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"sync"
@@ -585,6 +586,34 @@ func gatheringNATCompatible(ep *Endpoint, joiner natClass, members []uint64, joi
 	return true
 }
 
+// motDePasseCompatible dit si un salon protege par mot de passe peut accueillir ce joueur.
+//
+// CE QU'ON CORRIGE. Le filtre disait simplement « pas de mot de passe », ce qui est juste
+// pour l'appariement PUBLIC — personne ne doit atterrir par hasard dans un salon prive.
+// Mais il s'appliquait AUSSI a un joueur qui demande explicitement le mode prive : sa
+// recherche ne pouvait alors rien trouver, jamais, et il ouvrait son propre salon.
+//
+// MESURE, PAC-MAN 99, 2026-08-26 : mode public 92000, 25 jointures sur 85 et des salons a
+// 2, 3, 4 joueurs. Mode prive 82000, ZERO jointure sur 11 et count=1 a chaque fois. Deux
+// personnes ne se sont jamais rencontrees en prive. Le filtre NAT est hors de cause : pas
+// une seule ligne « NAT-aware » dans tout le journal.
+//
+// La regle : un salon sans mot de passe reste ouvert a tous. Un salon protege n'accepte que
+// celui qui presente LE MEME mot de passe, non vide. Exiger qu'il soit non vide est
+// deliberé — sinon deux salons prives distincts, tous deux « proteges » par une chaine
+// vide, se confondraient, ce qui est exactement ce qu'un salon prive ne doit pas faire.
+//
+// Comparaison a temps constant : le mot de passe vient du reseau et distingue deux salons.
+func motDePasseCompatible(cand *MatchmakeSession, src *MatchmakeSession) bool {
+	if !cand.UserPasswordEnabled {
+		return true
+	}
+	if !src.UserPasswordEnabled || src.UserPassword == "" || cand.UserPassword == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cand.UserPassword), []byte(src.UserPassword)) == 1
+}
+
 func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
 	var param AutoMatchmakeParam
@@ -611,7 +640,7 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 		for _, cand := range m.gatherings {
 			if cand.session.GameMode == src.GameMode &&
 				cand.session.OpenParticipation &&
-				!cand.session.UserPasswordEnabled &&
+				motDePasseCompatible(cand.session, src) &&
 				uint16(len(cand.participants)) < cand.session.MaxParticipants {
 				// Skip a lobby the joiner can't hole-punch with (would give everyone 2618-0510);
 				// keep looking for a compatible one.
@@ -648,8 +677,8 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 	out.Add(&result)
 	m.mu.Unlock()
 
-	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v respLen=%d\n  resp=%x\n",
-		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(out.Bytes()), out.Bytes())
+	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v pwOn=%v pwLen=%d open=%v respLen=%d\n  resp=%x\n",
+		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, result.UserPasswordEnabled, len(result.UserPassword), result.OpenParticipation, len(out.Bytes()), out.Bytes())
 	// Always notify the owner of the participation — including the lone-host self-join
 	// (joined==false), which is the case Pia needs to leave the WaitNotification wall.
 	_ = joined

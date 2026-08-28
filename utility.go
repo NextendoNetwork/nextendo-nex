@@ -80,6 +80,9 @@ var utilityNbReglages = func() int {
 // le verifier au lieu d'en debattre.
 var utilityValeursReglages = analyserValeursReglages(os.Getenv("NEX_UTILITY_VALEURS"))
 
+// utilityClesU32 : ecrire les cles de la carte de reglages en 32 bits au lieu de 16.
+var utilityClesU32 = os.Getenv("NEX_UTILITY_CLES_U32") == "1"
+
 // analyserValeursReglages lit une liste "cle=valeur,cle=valeur".
 func analyserValeursReglages(brut string) map[int]int32 {
 	out := map[int]int32{}
@@ -171,7 +174,17 @@ func UtilityHandler() RMCHandler {
 			if req.Method == MethodGetIntegerSettings && nbReglages > 0 {
 				out.U32(uint32(nbReglages))
 				for k := 0; k < nbReglages; k++ {
-					out.U16(uint16(k))
+					// LARGEUR DE LA CLE. Une Map NEX s'ecrit « u32 compte » puis des paires ;
+					// la largeur de la CLE depend de la version de NEX du titre. PAC-MAN 99
+					// (2021) accepte u16 — mesure sur console. TETRIS 99 est de 2019 et
+					// s'arrete net apres avoir recu cette reponse, sans plus rien emettre ;
+					// le CONTENU n'y change rien (vide, 22 ou 64 entrees echouent pareil),
+					// donc c'est la FORME qu'il faut essayer.
+					if utilityClesU32 {
+						out.U32(uint32(k))
+					} else {
+						out.U16(uint16(k))
+					}
 					out.U32(uint32(valeurs[k])) // absente = 0
 				}
 				fmt.Printf("[Utility] carte de reglages groupe=%d : %d entrees, valeurs non nulles=%v\n",

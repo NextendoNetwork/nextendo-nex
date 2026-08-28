@@ -30,7 +30,18 @@ type Ranking2CommonData struct {
 func (d *Ranking2CommonData) Levels() []Level {
 	return []Level{{
 		Save: func(o *StreamOut) {
-			o.String(d.UserName)
+			// StringVideZero, PAS String. Une chaine VIDE doit s'ecrire longueur 0 et rien
+			// d'autre ; String ecrit longueur 1 plus un octet nul. Un octet, et tout ce qui
+			// suit se lit decale.
+			//
+			// C'est le cas ici en permanence : le classement cite des joueurs dont on n'a
+			// pas encore les donnees communes, donc leur pseudo est vide. Avec trois
+			// entrees, trois octets de decalage — le jeu refusait la reponse.
+			//
+			// Deuxieme fois que ce piege mord ce depot, apres l'Endless de SMM2. La note
+			// de stream.go se demandait si la convention etait generale : cette mesure-ci
+			// dit que oui.
+			o.StringVideZero(d.UserName)
 			o.QBuffer(d.Mii)
 			o.QBuffer(d.BinaryData)
 		},

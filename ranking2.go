@@ -24,6 +24,11 @@ const (
 	MethodRanking2GetEstimateMyRank  uint32 = 11
 )
 
+// ranking2LowestRank : le rang le plus bas retenu par une categorie. Une seule
+// definition pour GetRanking et GetCategorySetting — les voir diverger est ce qui
+// rendrait la reponse incoherente.
+const ranking2LowestRank uint32 = 10000
+
 // Ranking2CategorySetting decrit une categorie de classement : les bornes de score, le
 // rang le plus bas retenu, et quand la saison se remet a zero.
 type Ranking2CategorySetting struct {
@@ -149,12 +154,32 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, nil)
 
 		case MethodRanking2GetCommonData:
-			r.mu.RLock()
-			data := r.communs[conn.PID]
-			r.mu.RUnlock()
-			fmt.Printf("[Ranking2] donnees communes rendues pid=%d (%d o)\n", conn.PID, len(data))
+			// TROIS FAUTES ICI, et la troisieme provoquait 2306-0116 (Core::BufferOverflow).
+			//
+			//  1. On IGNORAIT le joueur demande. La requete porte
+			//     « optionFlags u32 · principalId PID · nexUniqueId u64 » : le jeu demande
+			//     les donnees d'UN joueur precis — celles des autres, pour afficher leurs
+			//     noms dans le classement — et on rendait toujours celles de l'appelant.
+			//
+			//  2. On rendait le corps BRUT depose par PutCommonData, qui vaut « la structure
+			//     PUIS un u64 ». Huit octets de trop, que le client compte et refuse.
+			//
+			//  3. Et quand on n'avait rien pour ce joueur, on rendait ZERO octet. Le client
+			//     essaie alors d'extraire une structure du vide et deborde. Une structure
+			//     VIDE et une reponse vide ne sont pas la meme chose.
+			in := NewStreamIn(req.Body, conn.Settings)
+			_ = in.U32() // optionFlags
+			cible := in.PID()
+			if in.Err() != nil || cible == 0 {
+				cible = conn.PID
+			}
+			d := r.donneesCommunes(cible, conn.Settings)
+			out := NewStreamOut(conn.Settings)
+			out.Add(&d)
+			fmt.Printf("[Ranking2] donnees communes de pid=%d rendues a pid=%d (nom=%q, %d o)\n",
+				cible, conn.PID, d.UserName, len(out.Bytes()))
 
-			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, data)
+			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
 
 		case MethodRanking2DelCommonData:
 			r.mu.Lock()
@@ -181,10 +206,15 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			}
 
 			info := Ranking2Info{
-				// Le rang le plus bas et le nombre de classes portent sur le classement
-				// ENTIER, pas sur la page rendue : ils servent au jeu a afficher « 4e sur
-				// 27 », ce qui serait faux si on ne comptait que la fenetre.
-				LowestRank:  uint32(len(tous)),
+				// lowestRank est le rang le plus bas que la CATEGORIE retient — un
+				// plafond de configuration, pas un compte. Je l'avais confondu avec le
+				// nombre d'inscrits, ce qui donnait zero sur un classement vide : le jeu
+				// redemandait alors le classement en boucle sans jamais l'afficher.
+				//
+				// Le serveur de reference (kinnay, lu pour les faits) rend 10000 meme
+				// vide, et la meme valeur dans GetCategorySetting. Les deux doivent
+				// s'accorder : elles decrivent la meme categorie.
+				LowestRank:  ranking2LowestRank,
 				NumRankedIn: uint32(len(tous)),
 			}
 			for idx := debut; idx < fin; idx++ {
@@ -262,7 +292,7 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			out.Add(&Ranking2CategorySetting{
 				MinScore:   0,
 				MaxScore:   999999999,
-				LowestRank: 10000,
+				LowestRank: ranking2LowestRank,
 				ResetMonth: 4095,
 				ScoreOrder: true,
 			})

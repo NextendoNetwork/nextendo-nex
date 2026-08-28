@@ -51,6 +51,17 @@ type NotificationEventV1 struct {
 func (n *NotificationEventV1) Levels() []Level {
 	return []Level{{
 		Version: 1,
+		// StringVideZero, PAS String, pour StrParam.
+		//
+		// LE PIEGE, ET IL A DEJA MORDU DEUX FOIS CE DEPOT. Une chaine VIDE doit s'ecrire
+		// longueur 0 ; String ecrit longueur 1 plus un octet nul. Ici StrParam est TOUJOURS
+		// vide — la passation ne s'en sert pas — donc l'octet de trop tombe juste avant
+		// Param3 et la carte ou voyagent l'url et le jeton. Le client lit tout ce qui suit
+		// decale, ne reconnait rien, et jette l'evenement SANS RIEN DIRE.
+		//
+		// C'est exactement la panne du classement de SMB35 mesuree le 2026-08-27, et
+		// stream.go prevenait deja que String() n'avait pas ete audite ailleurs. Il l'est
+		// maintenant ici.
 		Save: func(o *StreamOut) {
 			o.PID(n.PIDSource)
 			o.U32(n.Type)
@@ -61,12 +72,12 @@ func (n *NotificationEventV1) Levels() []Level {
 			if notifParams32 {
 				o.U32(uint32(n.Param1))
 				o.U32(uint32(n.Param2))
-				o.String(n.StrParam)
+				o.StringVideZero(n.StrParam)
 				o.U32(uint32(n.Param3))
 			} else {
 				o.U64(n.Param1)
 				o.U64(n.Param2)
-				o.String(n.StrParam)
+				o.StringVideZero(n.StrParam)
 				o.U64(n.Param3)
 			}
 			o.U32(uint32(len(n.MapParam)))
