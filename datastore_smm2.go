@@ -362,8 +362,14 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	stats(0, 0)
 
 	// endless_challenge_high_scores : facile, normal, expert, super expert.
-	// A zero parce que le mode sans fin ne demarre pas encore.
-	stats(0, 0, 0, 0)
+	//
+	// Ces quatre nombres etaient des ZEROS EN DUR, avec la note « parce que le mode sans
+	// fin ne demarre pas encore ». Vrai le jour ou c'etait ecrit, faux depuis qu'il
+	// demarre. C'est le meme piege que SuperWorldId juste plus bas dans cette fonction, et
+	// c'est la deuxieme fois qu'il mord ce fichier : une constante qui dit la verite « pour
+	// le moment » finira par mentir, et le seul remede est d'aller la chercher a la source.
+	rec := SMM2RecordsEndless(p.PID)
+	stats(rec[0], rec[1], rec[2], rec[3])
 
 	// multiplayer_stats : cles 0 score, 2 parties versus, 3 victoires versus,
 	// 10 parties coop, 11 victoires coop. Vide tant que le multijoueur ne demarre pas :
@@ -566,6 +572,19 @@ func SMM2PIDJoueur(id uint64) uint64 {
 		return id
 	}
 	return SMM2PIDJoueurFn(id)
+}
+
+// SMM2RecordsEndlessFn : fourni par le jeu, rend le MEILLEUR nombre de niveaux enchaines
+// par un joueur dans chaque difficulte du mode sans fin. C'est un record, pas l'etat de la
+// partie en cours : il survit a la fin de celle-ci, sinon il ne serait pas un record.
+var SMM2RecordsEndlessFn func(pid uint64) [4]uint32
+
+// SMM2RecordsEndless interroge le fournisseur s'il a ete pose.
+func SMM2RecordsEndless(pid uint64) [4]uint32 {
+	if SMM2RecordsEndlessFn == nil {
+		return [4]uint32{}
+	}
+	return SMM2RecordsEndlessFn(pid)
 }
 
 var SMM2SuperMondeIDFn func(pid uint64) string
