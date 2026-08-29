@@ -372,10 +372,18 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	stats(rec[0], rec[1], rec[2], rec[3])
 
 	// multiplayer_stats : cles 0 score, 2 parties versus, 3 victoires versus,
-	// 10 parties coop, 11 victoires coop. Vide tant que le multijoueur ne demarre pas :
-	// une table de zeros affirmerait « zero victoire sur zero partie », ce qui est vrai
-	// mais qu'on ne mesure pas.
-	WriteMap(champs, map[uint8]uint32{}, func(o *StreamOut, k uint8) { o.U8(k) }, func(o *StreamOut, v uint32) { o.U32(v) })
+	// 10 parties coop, 11 victoires coop.
+	//
+	// ELLE ETAIT VIDE, avec la note « tant que le multijoueur ne demarre pas ». Le
+	// cooperatif demarre depuis le 2026-08-29, et c'est la TROISIEME table de cette
+	// fonction dont la justification a expire sans que personne y revienne — apres
+	// SuperWorldId et les records du mode sans fin.
+	//
+	// La cle 0 est la NOTE du joueur, celle qui le classe en versus. Un mode competitif ne
+	// peut pas lancer une partie si le serveur ne sait pas dans quel rang ranger celui qui
+	// la demande, et c'est la piste la plus serieuse pour le versus, qui refuse d'avancer.
+	// Le jeu fournit la table ; a defaut, on n'ecrit rien, comme avant.
+	WriteMap(champs, SMM2StatsMultijoueur(p.PID), func(o *StreamOut, k uint8) { o.U8(k) }, func(o *StreamOut, v uint32) { o.U32(v) })
 
 	// unk7 : points de createur de la semaine.
 	stats(0)
@@ -577,6 +585,18 @@ func SMM2PIDJoueur(id uint64) uint64 {
 // SMM2RecordsEndlessFn : fourni par le jeu, rend le MEILLEUR nombre de niveaux enchaines
 // par un joueur dans chaque difficulte du mode sans fin. C'est un record, pas l'etat de la
 // partie en cours : il survit a la fin de celle-ci, sinon il ne serait pas un record.
+// SMM2StatsMultijoueurFn : fourni par le jeu, rend la table multiplayer_stats — la note du
+// joueur et ses compteurs de parties. Absent : table vide, le comportement d'avant.
+var SMM2StatsMultijoueurFn func(pid uint64) map[uint8]uint32
+
+// SMM2StatsMultijoueur interroge le fournisseur s'il a ete pose.
+func SMM2StatsMultijoueur(pid uint64) map[uint8]uint32 {
+	if SMM2StatsMultijoueurFn == nil {
+		return map[uint8]uint32{}
+	}
+	return SMM2StatsMultijoueurFn(pid)
+}
+
 var SMM2RecordsEndlessFn func(pid uint64) [4]uint32
 
 // SMM2RecordsEndless interroge le fournisseur s'il a ete pose.

@@ -383,3 +383,30 @@ func (m *Matchmaking) applySessionPart(p *UpdateMatchmakeSessionParam) bool {
 // bien son propre Participate(3001) avec Param2 = son PID — exactement l'événement qu'attend
 // sa table de stations. Le contournement est donc inutile ici, et l'ajouter enverrait un
 // doublon. Documenté plutôt que codé, pour que personne ne le « rajoute » plus tard.
+
+// GidDuParticipant rend l'identifiant de la partie a laquelle un joueur participe, ou
+// zero s'il n'est dans aucune.
+//
+// POURQUOI IL EST EXPOSE. En cooperatif, les joueurs d'une meme partie demandent le niveau
+// CHACUN DE LEUR COTE. Le serveur doit leur rendre le meme, et le seul lien qui les unit
+// est l'identifiant de leur partie. Sans lui, il faudrait choisir le niveau d'apres quelque
+// chose de global — l'heure, un compteur — et deux consoles a cheval sur la frontiere
+// tomberaient dans deux niveaux differents.
+//
+// Prend le verrou lui-meme, contrairement a sessionOfParticipant que ses appelants
+// verrouillent deja.
+func (m *Matchmaking) GidDuParticipant(pid uint64) uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for gid, g := range m.gatherings {
+		if g.session == nil {
+			continue
+		}
+		for _, p := range g.participants {
+			if p == pid {
+				return gid
+			}
+		}
+	}
+	return 0
+}
