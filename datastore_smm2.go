@@ -122,6 +122,20 @@ func handleDataStoreGetUsers(conn *Connection, req *RMCMessage) *RMCMessage {
 	pids := ReadList(body, func(i *StreamIn) uint64 { return i.PID() })
 	option := body.U32()
 
+	// TRADUCTION NSA -> PID. La console ne designe pas toujours un joueur par son PID
+	// NEX : elle envoie parfois l'identifiant NSA de son compte Nintendo, un nombre de
+	// sept a dix-neuf chiffres qui ne ressemble a aucun de nos PID. Cherche tel quel, il
+	// ne correspond a rien, et nous repondions « ce joueur n'existe pas » a propos du
+	// joueur qui posait la question.
+	//
+	// C'est ce qui bloquait la publication des super mondes : le jeu demandait ses
+	// propres niveaux avec son NSA, recevait zero, et en concluait qu'ils avaient ete
+	// effaces de Course World. Mesure le 2026-08-28 — le meme nombre figure dans le
+	// journal d'authentification, ligne « NSA 11389664994428258486 -> account pid=... ».
+	for i, id := range pids {
+		pids[i] = SMM2PIDJoueur(id)
+	}
+
 	const maxPIDs = 256
 	if len(pids) > maxPIDs {
 		pids = pids[:maxPIDs]
@@ -398,12 +412,28 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 		champs.Write(u13.Bytes())
 	}
 
-	// SuperWorldId : vide, et c'est exact — personne n'a de super monde chez nous.
-	// Ecrit en longueur ZERO, comme le fait ocw-server : c'etait le seul octet qui
-	// separait notre UserInfo du leur.
-	champs.StringVideZero("")
-	stats(0)           // Unk15
-	champs.Bool(false) // Unk16
+	// SuperWorldId : l'identifiant du super monde de ce createur, ou la chaine vide s'il
+	// n'en a pas. C'est CE champ qui fait apparaitre son monde sur son profil.
+	//
+	// Il valait la chaine vide en dur, avec la note « personne n'a de super monde chez
+	// nous » : vrai le jour ou c'etait ecrit, faux depuis que les methodes 159 a 166
+	// existent. Le jeu fournit le compteur, comme pour les publications et les stats.
+	//
+	// Longueur ZERO quand il est vide, PAS longueur 1 + octet nul : ce champ est vide pour
+	// la grande majorite des joueurs, et l'octet de trop decalerait tout ce qui suit.
+	champs.StringVideZero(SMM2SuperMondeID(p.PID))
+	// Unk15 : une table dont la cle 0 compte les super mondes JOUES par ce joueur.
+	// La forme est la bonne ; le compte reste a zero tant qu'on ne l'agrege pas.
+	stats(0)
+
+	// Unk16 : VRAI. Nous ecrivions faux.
+	//
+	// Personne ne sait ce que ce booleen commande — ocw-server le note « this value
+	// changes constantly, likely important » et n'en dit pas plus. Mais leur serveur
+	// publie les super mondes et envoie VRAI, le notre les refusait et envoyait FAUX.
+	// Entre deux valeurs inconnues, on prend celle qui accompagne un comportement qui
+	// marche, et on ecrit ici que c'est une mesure et non une deduction.
+	champs.Bool(true)
 
 	if s.StructHeader {
 		out.U8(3) // revision 3, comme l'attend le jeu
@@ -522,6 +552,32 @@ const smm2MaxPublications uint32 = 32
 // inverserait la dependance — le serveur depose ici sa fonction de comptage au
 // demarrage. Tant que personne ne la fournit, on rend zero, ce qui est le comportement
 // d'avant et ne casse aucun autre jeu.
+// SMM2SuperMondeIDFn : fourni par le jeu, rend l'identifiant du super monde d'un createur.
+// Absent (ou rendant la chaine vide) = ce joueur n'en a pas, ce qui est le cas normal.
+// SMM2PIDJoueurFn : fourni par le jeu, traduit un identifiant de joueur venu du client
+// vers un PID NEX. La bibliotheque ne peut pas le faire elle-meme — la correspondance
+// NSA -> compte vit dans le service de comptes, que seul le jeu sait joindre.
+var SMM2PIDJoueurFn func(id uint64) uint64
+
+// SMM2PIDJoueur traduit s'il y a de quoi, et rend l'identifiant inchange sinon. Un
+// traducteur absent doit laisser passer, pas tout casser.
+func SMM2PIDJoueur(id uint64) uint64 {
+	if SMM2PIDJoueurFn == nil {
+		return id
+	}
+	return SMM2PIDJoueurFn(id)
+}
+
+var SMM2SuperMondeIDFn func(pid uint64) string
+
+// SMM2SuperMondeID interroge le fournisseur s'il a ete pose.
+func SMM2SuperMondeID(pid uint64) string {
+	if SMM2SuperMondeIDFn == nil {
+		return ""
+	}
+	return SMM2SuperMondeIDFn(pid)
+}
+
 var SMM2CompteurPublies func(pid uint64) uint32
 
 // SMM2NombrePublies interroge le compteur s'il a ete fourni.

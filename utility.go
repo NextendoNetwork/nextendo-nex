@@ -121,12 +121,35 @@ func analyserValeursReglages(brut string) map[int]int32 {
 // valeurs globales, c'est-a-dire exactement ce qui est rendu aujourd'hui — l'appariement
 // de PAC-MAN 99 et de SMB35 depend de ce groupe 0, et on ne le modifie pas en passant.
 // Cela rend simplement le groupe 10 mesurable sans toucher au groupe qui fonctionne.
+// UtilityReglagesJeu : les reglages que le JEU fournit lui-meme, quand l'environnement n'en
+// donne aucun. Un jeu dont on connait les valeurs n'a pas a dependre d'une variable posee a
+// la main sur un conteneur — SMM2 tourne dans un `docker run` nu, ou ajouter une variable
+// veut dire le recreer de memoire.
+//
+// L'ENVIRONNEMENT RESTE PRIORITAIRE : NEX_UTILITY_REGLAGES continue de tout ecraser, et les
+// groupes par index aussi. Ceci n'est qu'un defaut, pour ne pas rendre une carte VIDE a un
+// jeu qui attend des reglages.
+var UtilityReglagesJeu map[int]int32
+
 func utilityReglagesPour(idx int64) (int, map[int]int32) {
 	if idx >= 0 {
 		suffixe := strconv.FormatInt(idx, 10)
 		if n, err := strconv.Atoi(os.Getenv("NEX_UTILITY_REGLAGES_" + suffixe)); err == nil && n >= 0 && n <= 4096 {
 			return n, analyserValeursReglages(os.Getenv("NEX_UTILITY_VALEURS_" + suffixe))
 		}
+	}
+	if utilityNbReglages == 0 && len(UtilityReglagesJeu) > 0 {
+		// Le nombre d'entrees est la borne haute des cles PLUS UNE : le client lit des
+		// POSITIONS, pas des cles, et s'arreter avant la derniere revient a ne pas la
+		// fournir du tout. C'est la lecon de PAC-MAN 99, ou la 22e position manquante
+		// suffisait a bloquer l'appariement.
+		n := 0
+		for k := range UtilityReglagesJeu {
+			if k+1 > n {
+				n = k + 1
+			}
+		}
+		return n, UtilityReglagesJeu
 	}
 	return utilityNbReglages, utilityValeursReglages
 }
