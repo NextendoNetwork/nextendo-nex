@@ -133,3 +133,72 @@ func lireUDP(t *testing.T, c *net.UDPConn, quoi string) string {
 
 	return string(buf[:n])
 }
+
+// TestApparierRemappePortQuandLeNATChange : un joueur derriere un NAT symetrique voit son
+// port source changer en cours de session. L ancien code jetait ces paquets une fois la
+// place prise — mesure du 2026-08-31 : 254 paquets recus pour 104 relayes.
+func TestApparierRemappePortQuandLeNATChange(t *testing.T) {
+	ps := &pairSocket{port: 30500, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"1.1.1.1", "2.2.2.2"}
+
+	a := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000}
+	b := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 2000}
+
+	if dst := ps.apparier(a); dst != nil {
+		t.Fatalf("premier paquet: pas encore de pair, obtenu %v", dst)
+	}
+	if dst := ps.apparier(b); dst == nil || dst.Port != 1000 {
+		t.Fatalf("b doit etre relaye vers a, obtenu %v", dst)
+	}
+
+	// Meme IP que a, port different : le NAT a remappe.
+	a2 := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1234}
+	dst := ps.apparier(a2)
+	if dst == nil || dst.Port != 2000 {
+		t.Fatalf("apres remap, a2 doit etre relaye vers b, obtenu %v", dst)
+	}
+	if ps.remaps != 1 {
+		t.Fatalf("remaps=%d, attendu 1", ps.remaps)
+	}
+	// Et b doit desormais repartir vers le NOUVEAU port de a.
+	if dst := ps.apparier(b); dst == nil || dst.Port != 1234 {
+		t.Fatalf("b doit suivre le nouveau port de a, obtenu %v", dst)
+	}
+}
+
+// TestApparierNeRemappePasSurIPPartagee : deux joueurs derriere la MEME IP publique (meme
+// foyer, CGNAT) n ont que le port pour se distinguer. Suivre le port melangerait les flux.
+func TestApparierNeRemappePasSurIPPartagee(t *testing.T) {
+	ps := &pairSocket{port: 30501, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"9.9.9.9", "9.9.9.9"}
+
+	a := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 1000}
+	b := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 2000}
+	ps.apparier(a)
+	ps.apparier(b)
+
+	c := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 3000}
+	if dst := ps.apparier(c); dst != nil {
+		t.Fatalf("un troisieme port sur une IP partagee doit etre refuse, obtenu %v", dst)
+	}
+	if ps.remaps != 0 {
+		t.Fatalf("remaps=%d, attendu 0", ps.remaps)
+	}
+	if ps.rejets != 1 {
+		t.Fatalf("rejets=%d, attendu 1", ps.rejets)
+	}
+}
+
+// TestApparierRefuseUneIPEtrangere garde le pare-feu d origine.
+func TestApparierRefuseUneIPEtrangere(t *testing.T) {
+	ps := &pairSocket{port: 30502, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"1.1.1.1", "2.2.2.2"}
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000})
+
+	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("6.6.6.6"), Port: 9}); dst != nil {
+		t.Fatalf("une IP hors liste doit etre refusee, obtenu %v", dst)
+	}
+	if ps.rejetVu["6.6.6.6:9"] != 1 {
+		t.Fatalf("le refus doit etre trace par source: %v", ps.rejetVu)
+	}
+}

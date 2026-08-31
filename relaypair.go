@@ -105,6 +105,16 @@ type pairSocket struct {
 	attendus [2]string // les deux IP publiques admises sur ce port
 	vus      [2]*net.UDPAddr
 	dernier  time.Time
+
+	// Comptage des paquets, pour savoir si une paire a VRAIMENT porte une partie. Une
+	// capture du 2026-08-31 a montre 254 paquets entrants pour 104 relayes sans qu aucune
+	// ligne de journal ne l indique : les compteurs cote serveur regardaient l appairage,
+	// jamais le trafic.
+	recus   uint64
+	relayes uint64
+	rejets  uint64
+	remaps  uint64
+	rejetVu map[string]uint64 // source refusee -> nombre de paquets
 }
 
 // PairRelayFor arme le port de la paire et rend l adresse a annoncer aux deux consoles.
@@ -146,6 +156,9 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	ps.mu.Lock()
 	ps.attendus = [2]string{ipA, ipB}
 	ps.dernier = time.Now()
+	if ps.rejetVu == nil {
+		ps.rejetVu = map[string]uint64{}
+	}
 	ps.mu.Unlock()
 
 	return host, port, true
@@ -160,10 +173,17 @@ func (ps *pairSocket) boucle() {
 			return // socket fermee par le faucheur
 		}
 
+		ps.mu.Lock()
+		ps.recus++
+		ps.mu.Unlock()
+
 		dst := ps.apparier(src)
 		if dst == nil {
 			continue
 		}
+		ps.mu.Lock()
+		ps.relayes++
+		ps.mu.Unlock()
 		if _, err := ps.conn.WriteToUDP(buf[:n], dst); err != nil {
 			fmt.Printf("[relais-paire] :%d renvoi %s -> %s echoue: %v\n", ps.port, src, dst, err)
 		}
@@ -195,6 +215,34 @@ func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
 		}
 	}
 
+	// Meme IP, place DEJA prise, port different : le NAT du joueur a remappe en cours de
+	// session. L ancien code jetait ces paquets pour toujours — or c est precisement le
+	// joueur au NAT strict que le relais existe pour servir. On suit le nouveau port.
+	//
+	// Uniquement quand les deux IP attendues DIFFERENT : si les deux joueurs partagent une
+	// IP publique (meme foyer, CGNAT), le port est le seul discriminant et le suivre
+	// melangerait les deux flux.
+	if ps.attendus[0] != ps.attendus[1] {
+		for i, ip := range ps.attendus {
+			if ip == src.IP.String() && ps.vus[i] != nil {
+				ancien := ps.vus[i]
+				ps.vus[i] = src
+				ps.remaps++
+				fmt.Printf("[relais-paire] :%d extremite %d remappee %s -> %s (NAT symetrique)\n",
+					ps.port, i+1, ancien, src)
+
+				return ps.vus[1-i]
+			}
+		}
+	}
+
+	// Refus. On garde QUI a ete refuse : sans cette ligne, un relais qui jette la moitie du
+	// trafic est indiscernable d un relais qui marche.
+	ps.rejets++
+	if ps.rejetVu != nil {
+		ps.rejetVu[src.String()]++
+	}
+
 	return nil
 }
 
@@ -216,7 +264,21 @@ func reapPairSockets() {
 			if ps.inactifDepuis(pairRelayTTL) {
 				ps.conn.Close()
 				delete(pairSocks, port)
-				fmt.Printf("[relais-paire] :%d ferme (silencieux depuis %s)\n", port, pairRelayTTL)
+				// Bilan a la fermeture : c est la SEULE trace qui dise si la paire a
+				// porte une partie ou si elle a jete le trafic. Les refus sont
+				// detailles par source, parce que « qui a ete refuse » est la
+				// question, pas « combien ».
+				ps.mu.Lock()
+				recus, relayes, rejets, remaps := ps.recus, ps.relayes, ps.rejets, ps.remaps
+				detail := ""
+				for src, n := range ps.rejetVu {
+					detail += fmt.Sprintf(" %s×%d", src, n)
+				}
+				attendus := ps.attendus
+				ps.mu.Unlock()
+
+				fmt.Printf("[relais-paire] :%d ferme — recus=%d relayes=%d rejets=%d remaps=%d (attendus %s / %s)%s\n",
+					port, recus, relayes, rejets, remaps, attendus[0], attendus[1], detail)
 			}
 		}
 		vide := len(pairSocks) == 0
