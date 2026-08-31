@@ -127,6 +127,17 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	if !on || ipA == "" || ipB == "" {
 		return "", 0, false
 	}
+
+	// Seulement pour ceux qui en ont besoin. Detourner une paire qui se joignait en direct,
+	// c est lui ajouter un aller-retour par la France et lui faire courir le risque du
+	// moindre defaut du relais — pour rien. Mesure du 2026-08-31 : arme pour tout le monde,
+	// il a mis dehors des joueurs qui n avaient aucun probleme.
+	//
+	// Il suffit qu UN des deux echoue : le percage est une operation a deux, et le NAT strict
+	// d un seul suffit a la faire rater.
+	if !BesoinDeRelais(pidA) && !BesoinDeRelais(pidB) {
+		return "", 0, false
+	}
 	port, ok := pairPortFor(pidA, pidB)
 	if !ok {
 		return "", 0, false

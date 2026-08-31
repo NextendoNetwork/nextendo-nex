@@ -47,6 +47,8 @@ func TestPairPortInerteQuandDesarme(t *testing.T) {
 func TestPaireFaitTraverserDansLesDeuxSens(t *testing.T) {
 	SetPairRelay("127.0.0.1", 31500, 50)
 	defer SetPairRelay("", 0, 0)
+	// Depuis relaybesoin.go, le relais n est accorde qu a une paire qui a deja echoue.
+	besoinPourTest(t, 7, 9)
 
 	_, port, ok := PairRelayFor(7, 9, "127.0.0.1", "127.0.0.1")
 	if !ok {
@@ -261,9 +263,9 @@ func TestRefuseUnAutreReseau(t *testing.T) {
 func TestPairRelayForOrdreStable(t *testing.T) {
 	SetPairRelay("127.0.0.1", 39000, 50)
 	defer SetPairRelay("", 0, 0)
-
 	const pidA, pidB = uint64(1800000123), uint64(1800024323)
 	ipA, ipB := "70.40.81.34", "181.78.0.151"
+	besoinPourTest(t, pidA, pidB)
 
 	_, port1, ok := PairRelayFor(pidA, pidB, ipA, ipB)
 	if !ok {
@@ -292,4 +294,21 @@ func TestPairRelayForOrdreStable(t *testing.T) {
 	if att[0] != ipA || att[1] != ipB {
 		t.Fatalf("attendus inverses par le second appel: %v", att)
 	}
+}
+
+// besoinPourTest rend les PID eligibles au relais, comme deux echecs de percage le feraient
+// en production. Les tests du relais decrivent le TRANSPORT ; l eligibilite a les siens.
+func besoinPourTest(t *testing.T, pids ...uint64) {
+	t.Helper()
+	for _, p := range pids {
+		NotePercage(p, false)
+		NotePercage(p, false)
+	}
+	t.Cleanup(func() {
+		besoinMu.Lock()
+		for _, p := range pids {
+			delete(besoins, p)
+		}
+		besoinMu.Unlock()
+	})
 }

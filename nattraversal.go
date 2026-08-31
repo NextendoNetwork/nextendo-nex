@@ -205,6 +205,10 @@ func logNATResult(conn *Connection, req *RMCMessage) {
 		verdict = "ok"
 	}
 
+	// Ce verdict est la SEULE parole de la console sur son percage direct. Il alimente
+	// l eligibilite au relais : on ne detourne que ceux qui ont deja echoue.
+	NotePercage(conn.PID, result)
+
 	fmt.Printf("[NAT] pid=%d hole-punch to cid=%d %s (rtt=%dms detail=%d)\n",
 		conn.PID, cid, verdict, rtt, detail)
 }
