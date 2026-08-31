@@ -275,6 +275,13 @@ func (cfg *AuthConfig) handleLoginWithContext(conn *Connection, req *RMCMessage)
 	if conn != nil {
 		RememberAuthPID(conn.RemoteAddr, pid)
 	}
+	// On retient AUSSI la correspondance identifiant-de-connexion -> PID.
+	//
+	// Certains jeux ne parlent jamais notre PID interne : Super Mario Maker 2 reclame
+	// les profils par l'identifiant NSA, celui-la meme qui arrive ici comme `username`.
+	// Sans cette table, DataStore cherchait un PID qu'on ne lui avait jamais donne et
+	// ne trouvait jamais rien — le jeu retombait sur un Mii generique.
+	RememberLoginName(username, pid)
 
 	keyLen := cfg.SessionKeyLength
 	if keyLen == 0 {
@@ -336,6 +343,13 @@ func (cfg *AuthConfig) handleLogin(conn *Connection, req *RMCMessage) *RMCMessag
 	if conn != nil {
 		RememberAuthPID(conn.RemoteAddr, pid)
 	}
+	// On retient AUSSI la correspondance identifiant-de-connexion -> PID.
+	//
+	// Certains jeux ne parlent jamais notre PID interne : Super Mario Maker 2 reclame
+	// les profils par l'identifiant NSA, celui-la meme qui arrive ici comme `username`.
+	// Sans cette table, DataStore cherchait un PID qu'on ne lui avait jamais donne et
+	// ne trouvait jamais rien — le jeu retombait sur un Mii generique.
+	RememberLoginName(username, pid)
 
 	keyLen := cfg.SessionKeyLength
 	if keyLen == 0 {
@@ -387,4 +401,26 @@ func (cfg *AuthConfig) buildResponse(req *RMCMessage, retval uint32, pid uint64,
 		retval, pid, len(ticket), sourceKey, len(out.Bytes()), out.Bytes())
 
 	return NewRMCSuccess(s, ProtocolTicketGranting, req.Method, req.CallID, out.Bytes())
+}
+
+// loginNameToPID relie l'identifiant de connexion (le NSA, pour la Switch) au PID du
+// compte. Rempli a l'authentification, lu par les protocoles qui designent les joueurs
+// par cet identifiant plutot que par notre PID interne.
+var loginNameToPID sync.Map // string -> uint64
+
+// RememberLoginName enregistre la correspondance nom de connexion -> PID.
+func RememberLoginName(name string, pid uint64) {
+	if name == "" || pid == 0 {
+		return
+	}
+	loginNameToPID.Store(name, pid)
+}
+
+// PIDForLoginName rend le PID associe a un identifiant de connexion.
+func PIDForLoginName(name string) (uint64, bool) {
+	v, ok := loginNameToPID.Load(name)
+	if !ok {
+		return 0, false
+	}
+	return v.(uint64), true
 }

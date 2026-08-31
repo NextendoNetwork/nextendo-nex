@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"sync"
@@ -14,12 +15,13 @@ const (
 	ProtocolMatchMakingExt     uint16 = 0x32
 
 	// MatchMaking (0x15)
-	MethodUnregisterGathering uint32 = 0x02
-	MethodFindBySingleID15    uint32 = 0x15
-	MethodUpdateSessionURL    uint32 = 0x1B
-	MethodUpdateSessionHostV1 uint32 = 0x28
-	MethodGetSessionURLs      uint32 = 0x29
-	MethodUpdateSessionHost   uint32 = 0x2A
+	MethodUnregisterGathering     uint32 = 0x02
+	MethodFindBySingleID15        uint32 = 0x15
+	MethodUpdateSessionURL        uint32 = 0x1B
+	MethodUpdateSessionHostV1     uint32 = 0x28
+	MethodGetDetailedParticipants uint32 = 0x0F
+	MethodGetSessionURLs          uint32 = 0x29
+	MethodUpdateSessionHost       uint32 = 0x2A
 
 	// Splatfest TEAM battles combine two full 4-player teams by MIGRATING gathering ownership
 	// (kinnay MatchMaking 0x15: 43 UpdateGatheringOwnership, 44 MigrateGatheringOwnership, and
@@ -105,6 +107,24 @@ type Matchmaking struct {
 	// entre amis ; Smash n'appelle cette méthode qu'au démarrage et attend une liste vide,
 	// donc le défaut (false) préserve son comportement actuel.
 	FindByParticipantEnabled bool
+	// FindByParticipantVideVeutDireToutes : une liste de PID VIDE dans
+	// FindMatchmakeSessionByParticipant signifie « n'importe quelle session ouverte »
+	// et non « aucune ».
+	//
+	// MESURE DU 2026-08-24, SMM2 en cooperatif : le jeu envoie `pids=[]`. L'ancienne
+	// implementation bouclait sur cette liste, donc elle rendait zero session quoi qu'il
+	// arrive — deux joueurs entrant EN MEME TEMPS creaient chacun sa salle et ne se
+	// voyaient jamais. Le drapeau FindByParticipantEnabled ne pouvait rien y changer :
+	// il n'y avait rien a parcourir.
+	//
+	// C'est la meme convention que le reste de ce protocole, rencontree deux fois le
+	// meme soir : liste vide = joker. Dans GetUsers elle veut dire « mon profil », dans
+	// SearchCoursesPostedBy « mes niveaux », ici « toutes celles ou je peux entrer ».
+	//
+	// Le drapeau est separe parce qu'Animal Crossing active FindByParticipantEnabled
+	// pour la visite d'ile ENTRE AMIS : il envoie de vrais PID, et lui rendre un jour
+	// une liste ouverte ferait atterrir un visiteur sur l'ile d'un inconnu.
+	FindByParticipantVideVeutDireToutes bool
 	// SessionPartPersists fait ÉCRIRE les mises à jour partielles de session (0x6D.0x2C)
 	// au lieu de simplement les acquitter. Animal Crossing y envoie le « Dodo Code » de
 	// l'hôte ; Splatoon 2 n'appelle cette méthode qu'en fin de partie coop, où seul
@@ -135,8 +155,28 @@ type Matchmaking struct {
 	// publish themselves are unchanged.
 	OnFriendSessionCreated func(pid uint64, gid uint32)
 
-	notif      *notifStore
-	mu         sync.Mutex
+	notif *notifStore
+	mu    sync.Mutex
+	// OnSessionReady, s il est pose, est appele apres chaque AutoMatchmake reussi avec
+	// le salon et ses participants. Sert a PAC-MAN 99 pour envoyer la passation Eagle ;
+	// nil — le defaut — laisse tous les autres titres inchanges.
+	OnSessionReady func(gid uint32, participants []uint64)
+
+	// NotifierDeparts previent le PROPRIETAIRE du salon quand un participant s'en va.
+	//
+	// Sans cet avis, sa liste de joueurs ne DIMINUE jamais : elle accumule tous ceux qui
+	// sont partis sans se deconnecter proprement. MESURE DU 2026-08-26 : dans SUPER MARIO
+	// BROS. 35, l'hote annoncait DOUZE joueurs a un salon ou six consoles seulement
+	// atteignaient le relais — les autres attendaient six absents et abandonnaient.
+	//
+	// Opt-in : nil chez les autres titres, qui tournent tres bien sans depuis des mois et
+	// qu'on ne touche pas a cette heure-ci.
+	NotifierDeparts bool
+
+	// Endpoint sert a joindre le proprietaire d'un salon depuis RemovePlayer, qui ne
+	// recoit qu'un PID. Pose par le serveur de jeu en meme temps que NotifierDeparts.
+	Endpoint *Endpoint
+
 	gatherings map[uint32]*gathering
 	byCode     map[string]uint32
 	nextGID    uint32
@@ -238,6 +278,8 @@ func (m *Matchmaking) MatchMakingHandler() RMCHandler {
 		switch req.Method {
 		case MethodGetSessionURLs:
 			return m.getSessionURLs(conn, req)
+		case MethodGetDetailedParticipants:
+			return m.getDetailedParticipants(conn, req)
 		case MethodUnregisterGathering:
 			m.unregister(conn, req)
 			return boolResponse(conn, ProtocolMatchMaking, req, true)
@@ -451,6 +493,12 @@ func (m *Matchmaking) notifyParticipation(caller *Connection, participants []uin
 	}
 	fmt.Printf("[MM] participation gid=%d caller=%d -> announce to %d participant(s) + recap %d existing (participants=%v)\n",
 		gid, caller.PID, count, count-1, participants)
+
+	// Le salon vient de bouger : PAC-MAN 99 attend ici l'adresse du relais Eagle. Hors de
+	// ce titre le rappel est nil et rien ne change.
+	if m.OnSessionReady != nil {
+		m.OnSessionReady(gid, participants)
+	}
 }
 
 // [Nextendo] NAT-aware matchmaking. A symmetric-mapping ("Strict") NAT cannot hole-punch to
@@ -538,6 +586,34 @@ func gatheringNATCompatible(ep *Endpoint, joiner natClass, members []uint64, joi
 	return true
 }
 
+// motDePasseCompatible dit si un salon protege par mot de passe peut accueillir ce joueur.
+//
+// CE QU'ON CORRIGE. Le filtre disait simplement « pas de mot de passe », ce qui est juste
+// pour l'appariement PUBLIC — personne ne doit atterrir par hasard dans un salon prive.
+// Mais il s'appliquait AUSSI a un joueur qui demande explicitement le mode prive : sa
+// recherche ne pouvait alors rien trouver, jamais, et il ouvrait son propre salon.
+//
+// MESURE, PAC-MAN 99, 2026-08-26 : mode public 92000, 25 jointures sur 85 et des salons a
+// 2, 3, 4 joueurs. Mode prive 82000, ZERO jointure sur 11 et count=1 a chaque fois. Deux
+// personnes ne se sont jamais rencontrees en prive. Le filtre NAT est hors de cause : pas
+// une seule ligne « NAT-aware » dans tout le journal.
+//
+// La regle : un salon sans mot de passe reste ouvert a tous. Un salon protege n'accepte que
+// celui qui presente LE MEME mot de passe, non vide. Exiger qu'il soit non vide est
+// deliberé — sinon deux salons prives distincts, tous deux « proteges » par une chaine
+// vide, se confondraient, ce qui est exactement ce qu'un salon prive ne doit pas faire.
+//
+// Comparaison a temps constant : le mot de passe vient du reseau et distingue deux salons.
+func motDePasseCompatible(cand *MatchmakeSession, src *MatchmakeSession) bool {
+	if !cand.UserPasswordEnabled {
+		return true
+	}
+	if !src.UserPasswordEnabled || src.UserPassword == "" || cand.UserPassword == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cand.UserPassword), []byte(src.UserPassword)) == 1
+}
+
 func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
 	var param AutoMatchmakeParam
@@ -564,7 +640,7 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 		for _, cand := range m.gatherings {
 			if cand.session.GameMode == src.GameMode &&
 				cand.session.OpenParticipation &&
-				!cand.session.UserPasswordEnabled &&
+				motDePasseCompatible(cand.session, src) &&
 				uint16(len(cand.participants)) < cand.session.MaxParticipants {
 				// Skip a lobby the joiner can't hole-punch with (would give everyone 2618-0510);
 				// keep looking for a compatible one.
@@ -601,8 +677,8 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 	out.Add(&result)
 	m.mu.Unlock()
 
-	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v respLen=%d\n  resp=%x\n",
-		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, len(out.Bytes()), out.Bytes())
+	fmt.Printf("[MM] autoMatchmake pid=%d -> gid=%d owner=%d host=%d joined=%v count=%d mode=%d flags=%d state=%d minP=%d maxP=%d skLen=%d attribs=%v pwOn=%v pwLen=%d open=%v respLen=%d\n  resp=%x\n",
+		conn.PID, gid, result.OwnerPID, result.HostPID, joined, count, result.GameMode, result.Flags, result.State, result.MinParticipants, result.MaxParticipants, len(result.SessionKey), result.Attribs, result.UserPasswordEnabled, len(result.UserPassword), result.OpenParticipation, len(out.Bytes()), out.Bytes())
 	// Always notify the owner of the participation — including the lone-host self-join
 	// (joined==false), which is the case Pia needs to leave the WaitNotification wall.
 	_ = joined
@@ -1190,8 +1266,23 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 	// ligne — exactement le genre de trace fantôme que l'éviction des connexions corrige.
 	m.notif.forget(pid)
 
+	// On collecte les avis a emettre SOUS le verrou, et on les envoie APRES l'avoir
+	// relache : SendRMC ecrit sur une socket et peut bloquer, et tenir m.mu pendant ce
+	// temps gelerait tout le matchmaking pour les autres joueurs.
+	type avis struct {
+		conn *Connection
+		gid  uint32
+	}
+	var aPrevenir []avis
+
+	type migration struct {
+		gid             uint32
+		ancien, nouveau uint64
+		participants    []uint64
+	}
+	var aMigrer []migration
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for gid, g := range m.gatherings {
 		if g == nil || g.session == nil {
 			continue
@@ -1201,8 +1292,8 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 		if len(g.participants) == before {
 			continue // not in this gathering
 		}
-		// The owner leaving kills the lobby: it is theirs, and nothing here migrates a host.
-		if len(g.participants) == 0 || g.session.Gathering.OwnerPID == pid {
+		// Salon vide : il n'y a plus rien a garder.
+		if len(g.participants) == 0 {
 			delete(m.gatherings, gid)
 			if g.code != "" {
 				delete(m.byCode, g.code)
@@ -1210,8 +1301,81 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 			fmt.Printf("[MM] disconnect pid=%d -> gathering %d removed\n", pid, gid)
 			continue
 		}
+
+		// LE PROPRIETAIRE PART, MAIS IL RESTE DU MONDE.
+		//
+		// On DETRUISAIT le salon, ce qui ejectait tous les autres avec lui. Symptome dans
+		// SUPER MARIO BROS. 35 : l'hote s'en va et trois ou quatre consoles tombent dans
+		// les 80 millisecondes qui suivent — pas chacune de son cote, mais parce qu'on leur
+		// retirait la partie sous les pieds.
+		//
+		// Le vrai service MIGRE : il choisit un successeur parmi ceux qui restent et
+		// previent tout le salon (type 4000). Le drapeau 0x10 dit si le titre l'autorise ;
+		// SMB35 le pose (flags=0x210).
+		if g.session.Gathering.OwnerPID == pid {
+			if !m.NotifierDeparts || g.session.Gathering.Flags&0x10 == 0 {
+				delete(m.gatherings, gid)
+				if g.code != "" {
+					delete(m.byCode, g.code)
+				}
+				fmt.Printf("[MM] disconnect pid=%d -> gathering %d removed (pas de migration)\n", pid, gid)
+				continue
+			}
+			ancien := g.session.Gathering.OwnerPID
+			nouveau := g.participants[0]
+			g.session.Gathering.OwnerPID = nouveau
+			g.session.Gathering.HostPID = nouveau
+			if m.Endpoint != nil {
+				if c := m.Endpoint.FindConnectionByID(g.hostConnID); c != nil {
+					_ = c
+				}
+			}
+			aMigrer = append(aMigrer, migration{gid: gid, ancien: ancien, nouveau: nouveau,
+				participants: append([]uint64(nil), g.participants...)})
+			fmt.Printf("[MM] proprietaire pid=%d parti -> salon %d migre vers pid=%d\n", pid, gid, nouveau)
+		}
 		g.session.NumParticipants = uint32(len(g.participants))
 		fmt.Printf("[MM] disconnect pid=%d -> left gathering %d (%d left)\n", pid, gid, len(g.participants))
+
+		// Le proprietaire tient la liste des joueurs de la partie : s'il n'apprend pas les
+		// departs, elle ne fait que grossir.
+		if m.NotifierDeparts {
+			if m.Endpoint != nil {
+				if c := m.Endpoint.FindConnectionByPID(g.session.Gathering.OwnerPID); c != nil {
+					aPrevenir = append(aPrevenir, avis{conn: c, gid: gid})
+				}
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	// La migration se signale a TOUT le salon : chacun doit savoir qui commande.
+	for _, mg := range aMigrer {
+		for _, p := range mg.participants {
+			if m.Endpoint == nil {
+				break
+			}
+			c := m.Endpoint.FindConnectionByPID(p)
+			if c == nil {
+				continue
+			}
+			SendNotification(c, &NotificationEvent{
+				PIDSource: mg.ancien,
+				Type:      NotificationOwnershipChanged,
+				Param1:    uint64(mg.gid),
+				Param2:    mg.nouveau,
+			})
+		}
+	}
+
+	for _, a := range aPrevenir {
+		SendNotification(a.conn, &NotificationEvent{
+			PIDSource: pid,
+			Type:      NotificationParticipantDisconnected,
+			Param1:    uint64(a.gid),
+			Param2:    pid,
+		})
+		fmt.Printf("[MM] depart de pid=%d signale au proprietaire du salon %d\n", pid, a.gid)
 	}
 }
 
@@ -1326,4 +1490,64 @@ func isTournamentIDList(body []byte) bool {
 	}
 	n := uint32(body[0]) | uint32(body[1])<<8 | uint32(body[2])<<16 | uint32(body[3])<<24
 	return n > 0 && n <= 4096 && int(n)*4+4 == len(body)
+}
+
+// ParticipantDetails : une entree de la liste rendue par GetDetailedParticipants
+// (MatchMaking 0x15, methode 15). Structure documentee par kinnay :
+// PID + nom + message + nombre de participants.
+type ParticipantDetails struct {
+	IDParticipant uint64
+	Name          string
+	Message       string
+	Participants  uint16
+}
+
+// Levels implements Structure.
+func (p *ParticipantDetails) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.PID(p.IDParticipant)
+			o.String(p.Name)
+			o.String(p.Message)
+			o.U16(p.Participants)
+		},
+		Load: func(i *StreamIn) {
+			p.IDParticipant = i.PID()
+			p.Name = i.String()
+			p.Message = i.String()
+			p.Participants = i.U16()
+		},
+	}}
+}
+
+// getDetailedParticipants repond a MatchMaking 0x0F. PAC-MAN 99 l appelle JUSTE APRES
+// AutoMatchmake : il vient d entrer dans la salle et demande qui s y trouve. Sans reponse
+// il s arrete sur 2306-0103, salle creee mais partie jamais lancee.
+//
+// Le nom et le message restent vides : le serveur ne connait ici que des PID, et le jeu
+// affiche de toute facon le pseudo que chaque console porte elle-meme. Si un client se
+// revele exigeant sur ces champs, c est la premiere chose a regarder.
+func (m *Matchmaking) getDetailedParticipants(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	gid := NewStreamIn(req.Body, s).U32()
+
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	var pids []uint64
+	if g != nil {
+		pids = append(pids, g.participants...)
+	}
+	m.mu.Unlock()
+
+	out := NewStreamOut(s)
+	out.U32(uint32(len(pids)))
+	for _, pid := range pids {
+		out.Add(&ParticipantDetails{
+			IDParticipant: pid,
+			Participants:  1,
+		})
+	}
+	fmt.Printf("[MM] getDetailedParticipants gid=%d -> %d participant(s)\n", gid, len(pids))
+
+	return NewRMCSuccess(s, ProtocolMatchMaking, req.Method, req.CallID, out.Bytes())
 }

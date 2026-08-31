@@ -183,6 +183,45 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 
 	var results []*FindMatchmakeSessionByParticipantResult
 	m.mu.Lock()
+
+	// Liste vide = « n'importe quelle session ouverte ». Voir le commentaire du drapeau.
+	if len(param.PrincipalIDs) == 0 && m.FindByParticipantVideVeutDireToutes {
+		for _, g := range m.gatherings {
+			if g.session == nil || len(g.participants) == 0 {
+				continue
+			}
+			// On n'annonce pas au joueur la session ou il est DEJA : il chercherait a
+			// rejoindre la sienne, ce qui est le meme cul-de-sac qu'avant, en plus
+			// difficile a lire dans le journal.
+			deja := false
+			for _, p := range g.participants {
+				if p == conn.PID {
+					deja = true
+					break
+				}
+			}
+			if deja {
+				continue
+			}
+			r := *g.session
+			r.UserPassword = ""
+			// Le PID annonce est celui de l'HOTE : c'est lui que le demandeur va
+			// rejoindre, et le client s'en sert pour identifier la partie.
+			results = append(results, &FindMatchmakeSessionByParticipantResult{
+				PrincipalID: g.participants[0], Session: r,
+			})
+		}
+		m.mu.Unlock()
+		out := NewStreamOut(s)
+		out.U32(uint32(len(results)))
+		for _, r := range results {
+			out.Add(r)
+		}
+		fmt.Printf("[MM] findByParticipant(pids=[] = toutes) pid=%d -> %d session(s) ouverte(s)\n",
+			conn.PID, len(results))
+		return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+	}
+
 	for _, pid := range param.PrincipalIDs {
 		g := m.sessionOfParticipant(pid)
 		if g == nil {
@@ -344,3 +383,30 @@ func (m *Matchmaking) applySessionPart(p *UpdateMatchmakeSessionParam) bool {
 // bien son propre Participate(3001) avec Param2 = son PID — exactement l'événement qu'attend
 // sa table de stations. Le contournement est donc inutile ici, et l'ajouter enverrait un
 // doublon. Documenté plutôt que codé, pour que personne ne le « rajoute » plus tard.
+
+// GidDuParticipant rend l'identifiant de la partie a laquelle un joueur participe, ou
+// zero s'il n'est dans aucune.
+//
+// POURQUOI IL EST EXPOSE. En cooperatif, les joueurs d'une meme partie demandent le niveau
+// CHACUN DE LEUR COTE. Le serveur doit leur rendre le meme, et le seul lien qui les unit
+// est l'identifiant de leur partie. Sans lui, il faudrait choisir le niveau d'apres quelque
+// chose de global — l'heure, un compteur — et deux consoles a cheval sur la frontiere
+// tomberaient dans deux niveaux differents.
+//
+// Prend le verrou lui-meme, contrairement a sessionOfParticipant que ses appelants
+// verrouillent deja.
+func (m *Matchmaking) GidDuParticipant(pid uint64) uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for gid, g := range m.gatherings {
+		if g.session == nil {
+			continue
+		}
+		for _, p := range g.participants {
+			if p == pid {
+				return gid
+			}
+		}
+	}
+	return 0
+}

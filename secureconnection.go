@@ -11,6 +11,16 @@ const (
 	MethodRegister           uint32 = 0x1
 	MethodReplaceURL         uint32 = 0x7
 	MethodRegisterEx         uint32 = 0x4
+	// MethodTestConnectivity : le client verifie que la connexion securisee repond.
+	// Ni parametres, ni valeur de retour — une reponse vide SUFFIT, et c'est tout ce
+	// que le client attend (verifie dans nintendo/nex/secure.py de kinnay : la reponse
+	// est lue puis on exige stream.eof(), donc tout octet en trop serait une erreur).
+	//
+	// Elle manquait, et le serveur repondait donc "methode inconnue" a une question
+	// parfaitement legitime. Releve sur Mario Tennis Aces le 2026-08-23 : 23 fois en
+	// six heures, seule erreur du journal. Le manque touche TOUS les jeux NEX, pas un
+	// seul — c'est notre bibliotheque qui est incomplete, pas leur serveur.
+	MethodTestConnectivity uint32 = 0x5
 )
 
 // StationURL type flags.
@@ -78,6 +88,9 @@ func SecureConnectionHandlerWithConfig(cfg SecureConnectionConfig) RMCHandler {
 			return handleRegister(conn, req, cfg)
 		case MethodReplaceURL:
 			return handleReplaceURL(conn, req)
+		case MethodTestConnectivity:
+			// Reponse vide et succes : la connexion existe, puisqu'on repond dessus.
+			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)
 		default:
 			return notImplemented(conn, ProtocolSecureConnection, req)
 		}
