@@ -40,8 +40,105 @@ var (
 
 	pairSocksMu sync.Mutex
 	pairSocks   = map[int]*pairSocket{}
+	// pairPorts retient le port attribue a chaque paire. Depuis que le hachage peut etre
+	// deplace par une collision, le port n est plus une fonction pure des PID : les deux
+	// points d appel doivent donc lire la MEME attribution, pas la recalculer.
+	pairPorts   = map[[2]uint64]int{}
 	pairReaping bool
+
+	// Cumul depuis le demarrage, garde sous pairSocksMu. Les compteurs d une paire
+	// disparaissent avec elle ; sans ce cumul, juger le relais demande de lire le journal
+	// a la main sur une fenetre choisie au hasard — c est ainsi qu on a annonce 96% la ou
+	// il y avait 78%, et 14 eligibles la ou il y en eut 134.
+	pairTotal PairTotaux
 )
+
+// PairTotaux est le bilan cumule du relais depuis le demarrage du serveur.
+type PairTotaux struct {
+	Recus   uint64
+	Relayes uint64
+	Rejets  uint64
+	Remaps  uint64
+	// PairesOuvertes compte les ports alloues, PairesMuettes ceux fermes sans avoir relaye
+	// UN SEUL paquet. PairesMuettes est LE chiffre qui denonce un relais casse : une paire
+	// muette est une partie qui n a pas eu lieu, et rien d autre ne la signale.
+	PairesOuvertes uint64
+	PairesMuettes  uint64
+}
+
+// PairStat decrit une paire vivante.
+type PairStat struct {
+	Port       int
+	PIDs       [2]uint64
+	Attendus   [2]string
+	Places     [2]string // endpoints appris ; "" si la place est encore libre
+	Recus      uint64
+	Relayes    uint64
+	Rejets     uint64
+	Remaps     uint64
+	Rejetees   map[string]uint64
+	InactifSec int
+}
+
+// RelayStats est l etat complet du relais, pour le tableau de bord.
+type RelayStats struct {
+	Actif    bool
+	Host     string
+	PortBase int
+	PortSpan int
+	Paires   int
+	Total    PairTotaux
+	Vivantes []PairStat
+}
+
+// PairRelayStats rend un instantane du relais. Prend pairSocksMu puis chaque ps.mu, dans le
+// meme ordre que le faucheur, donc sans nouvel ordre de verrouillage.
+func PairRelayStats() RelayStats {
+	host, base, span, on := pairRelayConfig()
+
+	pairSocksMu.Lock()
+	defer pairSocksMu.Unlock()
+
+	st := RelayStats{
+		Actif:    on,
+		Host:     host,
+		PortBase: base,
+		PortSpan: span,
+		Paires:   len(pairSocks),
+		Total:    pairTotal,
+		Vivantes: make([]PairStat, 0, len(pairSocks)),
+	}
+
+	maintenant := time.Now()
+	for port, ps := range pairSocks {
+		ps.mu.Lock()
+		p := PairStat{
+			Port:       port,
+			PIDs:       [2]uint64{ps.pidLo, ps.pidHi},
+			Attendus:   ps.attendus,
+			Recus:      ps.recus,
+			Relayes:    ps.relayes,
+			Rejets:     ps.rejets,
+			Remaps:     ps.remaps,
+			InactifSec: int(maintenant.Sub(ps.dernier).Seconds()),
+			// Copie : ne jamais rendre la carte vivante, le boucle ecrit dedans.
+			Rejetees: make(map[string]uint64, len(ps.rejetVu)),
+		}
+		for i, vu := range ps.vus {
+			if vu != nil {
+				p.Places[i] = vu.String()
+			}
+		}
+		for k, v := range ps.rejetVu {
+			p.Rejetees[k] = v
+		}
+		ps.mu.Unlock()
+
+		st.Vivantes = append(st.Vivantes, p)
+	}
+
+	return st
+}
 
 // SetPairRelay arme le relais par paire sur une plage de ports, ou le desarme avec un host
 // vide. Les ports sont ouverts A LA DEMANDE, un par paire active : la plage borne
@@ -101,6 +198,11 @@ type pairSocket struct {
 	conn *net.UDPConn
 	port int
 
+	// Les deux PID que ce port sert. Fixes a l ouverture et jamais modifies : ils
+	// identifient la paire dans les statistiques, et servent a detecter une collision de
+	// port avec une AUTRE paire.
+	pidLo, pidHi uint64
+
 	mu       sync.Mutex
 	attendus [2]string // les deux IP publiques admises sur ce port
 	vus      [2]*net.UDPAddr
@@ -128,6 +230,15 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 		return "", 0, false
 	}
 
+	// L autorisation AVANT tout le reste : c est le seul passage par lequel entrent les deux
+	// points d appel, donc le seul endroit ou l on peut garantir qu aucun autre appelant
+	// ajoute plus tard ne contournera la liste. Les DEUX joueurs doivent y figurer — on ne
+	// peut pas relayer un seul cote d une paire, et accepter sur un seul detournerait le
+	// trafic de son partenaire, qui n a rien demande.
+	if !RelayVolontaire(pidA) || !RelayVolontaire(pidB) {
+		return "", 0, false
+	}
+
 	// Seulement pour ceux qui en ont besoin. Detourner une paire qui se joignait en direct,
 	// c est lui ajouter un aller-retour par la France et lui faire courir le risque du
 	// moindre defaut du relais — pour rien. Mesure du 2026-08-31 : arme pour tout le monde,
@@ -135,15 +246,51 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	//
 	// Il suffit qu UN des deux echoue : le percage est une operation a deux, et le NAT strict
 	// d un seul suffit a la faire rater.
-	if !BesoinDeRelais(pidA) && !BesoinDeRelais(pidB) {
+	if !BesoinDeRelais(pidA) && !BesoinDeRelais(pidB) &&
+		!RelayForce(pidA) && !RelayForce(pidB) {
 		return "", 0, false
 	}
-	port, ok := pairPortFor(pidA, pidB)
+	souhaite, ok := pairPortFor(pidA, pidB)
 	if !ok {
 		return "", 0, false
 	}
+	_, base, span, _ := pairRelayConfig()
+
+	lo, hi := pidA, pidB
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	cle := [2]uint64{lo, hi}
 
 	pairSocksMu.Lock()
+
+	// Le hachage tape dans 900 ports : deux paires differentes finissent regulierement sur
+	// le meme. L ancien code reutilisait alors la socket de l autre paire et ECRASAIT sa
+	// liste d adresses attendues, expulsant sur-le-champ deux joueurs en pleine partie. La
+	// probabilite est de l ordre de 20% a vingt paires simultanees et de 60% a quarante —
+	// donc d autant plus forte qu il y a de monde, ce qui colle aux paires muettes du
+	// 2026-08-31. Le commentaire de pairPortFor disait la collision inoffensive ; elle ne
+	// l est pas, car c est l ARRIVANT qui gagne et l occupant qui saute.
+	port, existe := pairPorts[cle]
+	if !existe {
+		port = -1
+		for i := 0; i < 8; i++ {
+			cand := base + (souhaite-base+i)%span
+			occupant := pairSocks[cand]
+			if occupant == nil || (occupant.pidLo == lo && occupant.pidHi == hi) {
+				port = cand
+
+				break
+			}
+		}
+		if port < 0 {
+			pairSocksMu.Unlock()
+			fmt.Printf("[relais-paire] collision non resolue pour pid=%d/%d — laisse en direct\n", pidA, pidB)
+
+			return "", 0, false
+		}
+	}
+
 	ps := pairSocks[port]
 	if ps == nil {
 		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
@@ -153,10 +300,24 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 
 			return "", 0, false
 		}
-		ps = &pairSocket{conn: conn, port: port}
+		ps = &pairSocket{conn: conn, port: port, pidLo: lo, pidHi: hi}
 		pairSocks[port] = ps
+		pairPorts[cle] = port
+		pairTotal.PairesOuvertes++
 		go ps.boucle()
-		fmt.Printf("[relais-paire] :%d ouvert pour pid=%d <-> pid=%d (%s, %s)\n", port, pidA, pidB, ipA, ipB)
+		deplace := ""
+		if port != souhaite {
+			deplace = fmt.Sprintf(" (deplace depuis :%d, collision)", souhaite)
+		}
+		fmt.Printf("[relais-paire] :%d ouvert pour pid=%d <-> pid=%d (%s, %s)%s\n", port, pidA, pidB, ipA, ipB, deplace)
+	} else if ps.pidLo != lo || ps.pidHi != hi {
+		// Ne JAMAIS reutiliser la socket d une autre paire : c est precisement ce qui
+		// expulsait l occupant.
+		pairSocksMu.Unlock()
+		fmt.Printf("[relais-paire] :%d appartient a pid=%d/%d — pid=%d/%d laisse en direct\n",
+			port, ps.pidLo, ps.pidHi, pidA, pidB)
+
+		return "", 0, false
 	}
 	if !pairReaping {
 		pairReaping = true
@@ -186,6 +347,10 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 		ps.rejetVu = map[string]uint64{}
 	}
 	ps.mu.Unlock()
+
+	// Seulement ici, au retour reussi : les sorties precedentes (desarme, sans besoin,
+	// collision) laissent la paire en DIRECT, et leurs verdicts sont de vraies mesures.
+	NoterPaireRelayee(pidA, pidB)
 
 	return host, port, true
 }
@@ -313,14 +478,17 @@ func (ps *pairSocket) inactifDepuis(d time.Duration) bool {
 // reapPairSockets ferme les ports dont la paire ne parle plus. Sans lui, une soiree
 // chargee laisserait un socket ouvert par partie jouee depuis le demarrage.
 func reapPairSockets() {
+	tour := 0
 	for {
 		time.Sleep(30 * time.Second)
+		tour++
 
 		pairSocksMu.Lock()
 		for port, ps := range pairSocks {
 			if ps.inactifDepuis(pairRelayTTL) {
 				ps.conn.Close()
 				delete(pairSocks, port)
+				delete(pairPorts, [2]uint64{ps.pidLo, ps.pidHi})
 				// Bilan a la fermeture : c est la SEULE trace qui dise si la paire a
 				// porte une partie ou si elle a jete le trafic. Les refus sont
 				// detailles par source, parce que « qui a ete refuse » est la
@@ -334,10 +502,38 @@ func reapPairSockets() {
 				attendus := ps.attendus
 				ps.mu.Unlock()
 
+				pairTotal.Recus += recus
+				pairTotal.Relayes += relayes
+				pairTotal.Rejets += rejets
+				pairTotal.Remaps += remaps
+				if relayes == 0 {
+					pairTotal.PairesMuettes++
+				}
+
 				fmt.Printf("[relais-paire] :%d ferme — recus=%d relayes=%d rejets=%d remaps=%d (attendus %s / %s)%s\n",
 					port, recus, relayes, rejets, remaps, attendus[0], attendus[1], detail)
 			}
 		}
+		// Bilan periodique. Le bilan par paire n arrive qu a sa fermeture, jusqu a deux
+		// minutes et demie apres qu elle s est tue : pendant un essai, c est trop tard
+		// pour decider quoi que ce soit. Une ligne toutes les trois minutes donne l etat
+		// pendant qu il se passe quelque chose, et elle existe meme si le tableau de bord
+		// est tombe.
+		if tour%6 == 0 {
+			vivantes := len(pairSocks)
+			enCours := PairTotaux{}
+			for _, ps := range pairSocks {
+				ps.mu.Lock()
+				enCours.Recus += ps.recus
+				enCours.Relayes += ps.relayes
+				enCours.Rejets += ps.rejets
+				ps.mu.Unlock()
+			}
+			fmt.Printf("[relais-paire] bilan — vivantes=%d | en cours recus=%d relayes=%d rejets=%d | cumul ouvertes=%d muettes=%d relayes=%d rejets=%d\n",
+				vivantes, enCours.Recus, enCours.Relayes, enCours.Rejets,
+				pairTotal.PairesOuvertes, pairTotal.PairesMuettes, pairTotal.Relayes, pairTotal.Rejets)
+		}
+
 		vide := len(pairSocks) == 0
 		if vide {
 			pairReaping = false
@@ -358,25 +554,70 @@ func closeAllPairSockets() {
 		ps.conn.Close()
 		delete(pairSocks, port)
 	}
+	// Sinon une paire desarmee puis rearmee retrouverait un port dont la socket n existe
+	// plus, et le registre grandirait sans fin.
+	pairPorts = map[[2]uint64]int{}
 	fmt.Printf("[relais-paire] desarme, tous les ports fermes\n")
 }
 
 // RelayStations repointe des stations vers le relais, en conservant tout le reste — CID,
 // PID, RVCID, natf, natm. Ce sont eux qui permettent a la Pia du pair de MONTER la session
 // une fois le premier paquet passe ; les perdre redonne un 2618-0502.
+// relayPointStation rend une copie d une station pointant vers le relais. Adresse, port, et
+// Pa s il etait deja la — RIEN d autre. Surtout pas natf/natm : la Pia du pair les lit pour
+// choisir comment sonder, et 0/0 ne veut pas dire « ouvert », il veut dire « non renseigne ».
+// Un seul point de verite, pour que les deux cotes (GetSessionURLs et InitiateProbe) ne
+// puissent pas diverger.
+func relayPointStation(u *StationURL, host string, port int) *StationURL {
+	if u == nil {
+		return nil
+	}
+	c := u.Copy()
+	c.Set("address", host)
+	c.SetInt("port", port)
+	if c.Get("Pa") != "" {
+		c.Set("Pa", host)
+	}
+
+	return c
+}
+
+// RelayStations repointe vers le relais LA SEULE station publique, et rend toutes les autres
+// telles quelles.
+//
+// L ancienne version repointait TOUTES les stations, donc leur donnait la meme adresse ET le
+// meme port : le visiteur recevait deux candidats identiques, et perdait au passage le CID de
+// l hote que porte la station LAN — celui dont sa Pia a besoin pour MONTER la session apres
+// le percage. La branche relay-fallback avait deja mesure la meme chose en production
+// (472c9d0) : le visiteur appelle EndParticipation des reception, avant meme de sonder. C est
+// l explication la plus probable des 85% de verdicts FAILED du 2026-08-31.
+//
+// La publique est reperee par ADRESSE (selectStations), pas par la presence de Pa : Splatoon 2
+// tourne en LegacyPiaConfig, qui n envoie jamais Pa, et relayedFor s applique aussi aux
+// chemins NON pontes ou aucune station n en porte. Un test sur Pa n y verrait rien a changer.
 func RelayStations(urls []*StationURL, host string, port int) []*StationURL {
+	_, public := selectStations(urls)
+	if public == nil || isPrivateIP(public.Get("address")) {
+		// Pas de candidat public a repointer : mieux vaut laisser la liste intacte et
+		// rester en direct que rendre une forme qu on ne sait pas construire.
+		fmt.Printf("[relais-paire] aucun candidat public a repointer — laisse en direct\n")
+
+		return urls
+	}
+
 	out := make([]*StationURL, 0, len(urls))
 	for _, u := range urls {
 		if u == nil {
 			continue
 		}
-		c := u.Copy()
-		c.Set("address", host)
-		c.SetInt("port", port)
-		if c.Get("Pa") != "" {
-			c.Set("Pa", host)
+		if u != public {
+			// Le meme pointeur, pas une copie : la facon la plus forte de dire
+			// « intacte », et la plus simple a verifier dans un test.
+			out = append(out, u)
+
+			continue
 		}
-		out = append(out, c)
+		out = append(out, relayPointStation(u, host, port))
 	}
 
 	return out

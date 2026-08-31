@@ -18,6 +18,7 @@ package nex
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -34,6 +35,15 @@ const (
 type besoinEtat struct {
 	echecs  int
 	dernier time.Time
+
+	// Historique de fond, sans fenetre : combien de percages DIRECTS ce joueur a tentes et
+	// combien ont abouti. Sert a reperer ceux qui ne se connectent JAMAIS — 45 sur 113 le
+	// 2026-08-31 — a qui le relais ne peut rien enlever puisqu ils ne jouent pas.
+	//
+	// Ces compteurs ne bougent que sur des verdicts directs : une fois le joueur relaye,
+	// relayvu.go coupe l alimentation et ils se figent, au lieu de se confirmer eux-memes.
+	essais    int
+	reussites int
 }
 
 var (
@@ -58,29 +68,46 @@ func NotePercage(pid uint64, reussi bool) {
 	// jamais revu.
 	if maintenant.Sub(besoinNet) > time.Minute {
 		for k, v := range besoins {
-			if maintenant.Sub(v.dernier) > besoinFenetre {
+			if maintenant.Sub(v.dernier) <= besoinFenetre {
+				continue
+			}
+			// On oublie ceux qui se connectent : il n y a rien a retenir d eux. On GARDE
+			// ceux qui n ont jamais reussi, sinon CandidatsRelais perdrait la memoire
+			// toutes les quinze minutes et personne ne serait jamais repere. La carte
+			// reste donc bornee par la population en panne, qui est justement celle
+			// qu on veut suivre.
+			if v.reussites > 0 {
 				delete(besoins, k)
 			}
 		}
 		besoinNet = maintenant
 	}
 
+	// L historique de fond survit a l effacement de l ardoise, et se met a jour dans les deux
+	// cas — c est le seul endroit ou l on voit un joueur reussir.
+	fond := besoins[pid]
+	if fond == nil {
+		fond = &besoinEtat{}
+		besoins[pid] = fond
+	}
+	fond.essais++
 	if reussi {
-		delete(besoins, pid)
+		fond.reussites++
+		// Ardoise remise a zero : il vient de prouver qu il n a pas besoin du relais.
+		fond.echecs = 0
+		fond.dernier = maintenant
 
 		return
 	}
 
-	e := besoins[pid]
-	if e == nil || maintenant.Sub(e.dernier) > besoinFenetre {
-		e = &besoinEtat{}
-		besoins[pid] = e
+	if maintenant.Sub(fond.dernier) > besoinFenetre {
+		fond.echecs = 0
 	}
-	e.echecs++
-	e.dernier = maintenant
+	fond.echecs++
+	fond.dernier = maintenant
 
-	if e.echecs == besoinSeuil {
-		fmt.Printf("[relais-besoin] pid=%d : %d echecs de percage — relais autorise pour lui\n", pid, e.echecs)
+	if fond.echecs == besoinSeuil {
+		fmt.Printf("[relais-besoin] pid=%d : %d echecs de percage — relais autorise pour lui\n", pid, fond.echecs)
 	}
 }
 
@@ -107,4 +134,49 @@ func BesoinStats() int {
 	}
 
 	return n
+}
+
+// BesoinListe rend les PID actuellement eligibles, tries.
+//
+// Le NOMBRE d eligibles a suffi a reperer que le critere se nourrissait lui-meme (14 sur 46,
+// puis 134 sur 151 une heure et demie plus tard) ; la LISTE dit LESQUELS, donc si la
+// croissance vient de joueurs reellement en panne ou de la boucle.
+func BesoinListe() []uint64 {
+	besoinMu.Lock()
+	defer besoinMu.Unlock()
+
+	out := make([]uint64, 0, len(besoins))
+	for pid, e := range besoins {
+		if e.echecs >= besoinSeuil && time.Since(e.dernier) <= besoinFenetre {
+			out = append(out, pid)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+
+	return out
+}
+
+// jamaisConnecteSeuil : au-dela, un joueur sans une seule reussite n a pas « eu de malchance »,
+// il n a pas de chemin direct du tout. Volontairement haut : ces joueurs sont ajoutes
+// automatiquement a la liste du relais, et le critere doit etre incontestable.
+const jamaisConnecteSeuil = 10
+
+// CandidatsRelais rend les joueurs qui n ont JAMAIS reussi un percage direct en au moins
+// jamaisConnecteSeuil tentatives.
+//
+// Le relais ne peut rien leur enlever : ils ne jouent pas. C est ce qui rend leur ajout
+// automatique defendable, la ou ouvrir le relais a tout le monde ne l est pas.
+func CandidatsRelais() []uint64 {
+	besoinMu.Lock()
+	defer besoinMu.Unlock()
+
+	out := make([]uint64, 0, 8)
+	for pid, e := range besoins {
+		if e.essais >= jamaisConnecteSeuil && e.reussites == 0 {
+			out = append(out, pid)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+
+	return out
 }

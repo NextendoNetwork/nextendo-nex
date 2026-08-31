@@ -155,9 +155,9 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 		corps := probeBody
 		if PairRelayActive() {
 			if rHost, rPort, ok := PairRelayFor(conn.PID, target.PID, PublicIPOf(conn), PublicIPOf(target)); ok {
-				u := ParseStationURL(station)
-				u.Set("address", rHost)
-				u.SetInt("port", rPort)
+				// Meme fonction que le cote visiteur : les deux moities doivent
+				// produire exactement la meme forme, sinon elles derivent en silence.
+				u := relayPointStation(ParseStationURL(station), rHost, rPort)
 				station = u.String()
 				out := NewStreamOut(s)
 				out.StationURL(u)
@@ -205,12 +205,24 @@ func logNATResult(conn *Connection, req *RMCMessage) {
 		verdict = "ok"
 	}
 
-	// Ce verdict est la SEULE parole de la console sur son percage direct. Il alimente
-	// l eligibilite au relais : on ne detourne que ceux qui ont deja echoue.
-	NotePercage(conn.PID, result)
+	// Ce verdict porte sur le percage DIRECT vers ce pair. Si la paire est passee par le
+	// relais, son candidat public a ete repointe : il n y a plus de direct, et le verdict est
+	// FAILED par construction. L alimenter avec ca, c est rendre l eligibilite
+	// auto-entretenue — mesure du 2026-08-31, de 14 eligibles sur 46 a 134 sur 151.
+	//
+	// Le cid est le RVCID du pair, donc son Connection.ID : meme resolution que
+	// pushInitiateProbe. Pair introuvable (deja parti, cas courant) = on compte le verdict,
+	// parce que l immense majorite des verdicts sont directs.
+	relaye := false
+	if peer := conn.Endpoint.FindConnectionByID(cid); peer != nil && peer.PID != 0 {
+		relaye = PaireRelayee(conn.PID, peer.PID)
+	}
+	if !relaye {
+		NotePercage(conn.PID, result)
+	}
 
-	fmt.Printf("[NAT] pid=%d hole-punch to cid=%d %s (rtt=%dms detail=%d)\n",
-		conn.PID, cid, verdict, rtt, detail)
+	fmt.Printf("[NAT] pid=%d hole-punch to cid=%d %s (rtt=%dms detail=%d relaye=%v)\n",
+		conn.PID, cid, verdict, rtt, detail, relaye)
 }
 
 // noteNATProperties parses ReportNATProperties (natMapping u32, natFiltering u32,

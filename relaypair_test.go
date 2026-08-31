@@ -94,6 +94,7 @@ func TestPaireFaitTraverserDansLesDeuxSens(t *testing.T) {
 func TestPaireRefuseUneAdresseNonAttendue(t *testing.T) {
 	SetPairRelay("127.0.0.1", 31600, 50)
 	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 11, 13)
 
 	_, port, ok := PairRelayFor(11, 13, "198.51.100.7", "198.51.100.8")
 	if !ok {
@@ -296,10 +297,12 @@ func TestPairRelayForOrdreStable(t *testing.T) {
 	}
 }
 
-// besoinPourTest rend les PID eligibles au relais, comme deux echecs de percage le feraient
-// en production. Les tests du relais decrivent le TRANSPORT ; l eligibilite a les siens.
+// besoinPourTest rend les PID relayables : autorises (liste de volontaires) ET eligibles
+// (deux echecs de percage), comme la production l exigerait. Les tests du relais decrivent le
+// TRANSPORT ; l autorisation et l eligibilite ont chacune les leurs.
 func besoinPourTest(t *testing.T, pids ...uint64) {
 	t.Helper()
+	volontairesPourTest(t, pids...)
 	for _, p := range pids {
 		NotePercage(p, false)
 		NotePercage(p, false)
@@ -311,4 +314,265 @@ func besoinPourTest(t *testing.T, pids ...uint64) {
 		}
 		besoinMu.Unlock()
 	})
+}
+
+// volontairesPourTest autorise ces PID et remet la liste a zero apres le test.
+func volontairesPourTest(t *testing.T, pids ...uint64) {
+	t.Helper()
+	SetRelayVolontaires(pids, nil, false)
+	t.Cleanup(func() { SetRelayVolontaires(nil, nil, false) })
+}
+
+// TestStatsComptentCeQuiPasseEtCeQuiEstJete : sans ces chiffres, un relais qui jette la
+// moitie du trafic est indiscernable d un relais qui marche. C est exactement ce qui a permis
+// d annoncer 96% la ou il y avait 78%.
+func TestStatsComptentCeQuiPasseEtCeQuiEstJete(t *testing.T) {
+	SetPairRelay("127.0.0.1", 39300, 20)
+	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 21, 22)
+
+	_, port, ok := PairRelayFor(21, 22, "127.0.0.1", "127.0.0.1")
+	if !ok {
+		t.Fatal("le port de la paire n a pas pu etre ouvert")
+	}
+	relais := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+
+	a := dialUDP(t)
+	defer a.Close()
+	b := dialUDP(t)
+	defer b.Close()
+
+	// A puis B s annoncent : le premier paquet de B est deja relaye vers A.
+	a.WriteToUDP([]byte("a1"), relais)
+	b.WriteToUDP([]byte("b1"), relais)
+	lireUDP(t, a, "b1 vers a")
+	// Un troisieme paquet de A, relaye vers B.
+	a.WriteToUDP([]byte("a2"), relais)
+	lireUDP(t, b, "a2 vers b")
+
+	st := PairRelayStats()
+	if !st.Actif || st.Paires != 1 {
+		t.Fatalf("actif=%v paires=%d, attendu true/1", st.Actif, st.Paires)
+	}
+	p := st.Vivantes[0]
+	if p.PIDs != [2]uint64{21, 22} {
+		t.Fatalf("PIDs=%v, attendu [21 22] tries", p.PIDs)
+	}
+	if p.Places[0] == "" || p.Places[1] == "" {
+		t.Fatalf("les deux places doivent etre occupees: %v", p.Places)
+	}
+	if p.Recus != 3 || p.Relayes != 2 {
+		t.Fatalf("recus=%d relayes=%d, attendu 3/2", p.Recus, p.Relayes)
+	}
+	if st.Total.PairesOuvertes == 0 {
+		t.Fatal("le cumul des paires ouvertes n a pas bouge")
+	}
+}
+
+// TestStatsPaireMuetteEstComptee : une paire qui n a rien relaye est une partie qui n a pas
+// eu lieu. C est le seul chiffre qui la denonce — 3 sur 17, puis 37 sur 565, sans qu aucune
+// autre mesure ne le montre.
+func TestStatsPaireMuetteEstComptee(t *testing.T) {
+	SetPairRelay("127.0.0.1", 39400, 20)
+	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 31, 32)
+
+	avant := PairRelayStats().Total.PairesMuettes
+
+	_, port, ok := PairRelayFor(31, 32, "198.51.100.1", "198.51.100.2")
+	if !ok {
+		t.Fatal("le port de la paire n a pas pu etre ouvert")
+	}
+
+	// Personne ne parle : on force le vieillissement et on fait passer le faucheur.
+	pairSocksMu.Lock()
+	ps := pairSocks[port]
+	pairSocksMu.Unlock()
+	ps.mu.Lock()
+	ps.dernier = time.Now().Add(-pairRelayTTL - time.Minute)
+	ps.mu.Unlock()
+
+	// Le faucheur tourne toutes les 30 s ; on reproduit son geste sans attendre.
+	pairSocksMu.Lock()
+	if ps.inactifDepuis(pairRelayTTL) {
+		ps.conn.Close()
+		delete(pairSocks, port)
+		if ps.relayes == 0 {
+			pairTotal.PairesMuettes++
+		}
+	}
+	apres := pairTotal.PairesMuettes
+	pairSocksMu.Unlock()
+
+	if apres != avant+1 {
+		t.Fatalf("paires muettes %d -> %d, attendu +1", avant, apres)
+	}
+}
+
+// stationsHote reproduit la forme que natBridgeStations rend a un visiteur : un candidat LAN
+// portant le CID de l hote (sans type ni Pa) et un candidat public.
+func stationsHote() []*StationURL {
+	lan := ParseStationURL("prudp:/address=192.168.1.20;port=50001;CID=4242;PID=1800000009;RVCID=99;natf=34;natm=1")
+	pub := ParseStationURL("prudp:/address=70.40.81.34;port=50001;CID=4242;PID=1800000009;RVCID=99;natf=34;natm=1;type=3;Pa=192.168.1.20")
+
+	return []*StationURL{lan, pub}
+}
+
+// TestRelayStationsNeRepointeQueLaPublique : repointer AUSSI le candidat LAN donnait deux
+// stations identiques et faisait perdre le CID de l hote — mesure du 2026-08-31, 85% de
+// verdicts FAILED, et la branche relay-fallback avait vu le visiteur appeler EndParticipation
+// des reception.
+func TestRelayStationsNeRepointeQueLaPublique(t *testing.T) {
+	urls := stationsHote()
+	avant := urls[0].String()
+
+	out := RelayStations(urls, "51.178.29.194", 30500)
+	if len(out) != 2 {
+		t.Fatalf("%d stations en sortie, attendu 2", len(out))
+	}
+	// La LAN doit etre LE MEME pointeur, donc rigoureusement intacte.
+	if out[0] != urls[0] {
+		t.Fatal("la station LAN a ete copiee ou modifiee")
+	}
+	if out[0].String() != avant {
+		t.Fatalf("station LAN modifiee:\n avant %s\n apres %s", avant, out[0].String())
+	}
+	if out[0].GetInt("CID") != 4242 {
+		t.Fatalf("le CID de l hote a disparu de la station LAN: %s", out[0].String())
+	}
+	// La publique, et elle seule, pointe vers le relais.
+	if got := out[1].Get("address"); got != "51.178.29.194" {
+		t.Fatalf("adresse publique = %q", got)
+	}
+	if got := out[1].GetInt("port"); got != 30500 {
+		t.Fatalf("port public = %d", got)
+	}
+	if got := out[1].Get("Pa"); got != "51.178.29.194" {
+		t.Fatalf("Pa = %q, attendu l adresse du relais", got)
+	}
+	// Ce que la Pia du pair lit pour choisir comment sonder doit survivre tel quel.
+	if out[1].GetInt("CID") != 4242 || out[1].GetInt("RVCID") != 99 ||
+		out[1].Get("natf") != "34" || out[1].Get("natm") != "1" {
+		t.Fatalf("champs d identite ou de NAT perdus: %s", out[1].String())
+	}
+	// Et les deux stations ne doivent PAS se retrouver identiques.
+	if out[0].Get("address") == out[1].Get("address") {
+		t.Fatal("les deux stations pointent au meme endroit")
+	}
+}
+
+// TestRelayStationsSansPa : Splatoon 2 tourne en LegacyPiaConfig et n envoie jamais Pa. Un
+// reperage de la station publique base sur Pa ne verrait rien a repointer ici.
+func TestRelayStationsSansPa(t *testing.T) {
+	lan := ParseStationURL("prudp:/address=10.0.0.5;port=50001;CID=7;RVCID=3")
+	pub := ParseStationURL("prudp:/address=201.97.27.16;port=52802;CID=7;RVCID=3;type=3")
+
+	out := RelayStations([]*StationURL{lan, pub}, "51.178.29.194", 30600)
+	if out[1].Get("address") != "51.178.29.194" || out[1].GetInt("port") != 30600 {
+		t.Fatalf("la publique n a pas ete repointee: %s", out[1].String())
+	}
+	if out[1].Has("Pa") {
+		t.Fatalf("Pa a ete invente alors qu il etait absent: %s", out[1].String())
+	}
+	if out[0] != lan {
+		t.Fatal("la station LAN a ete touchee")
+	}
+}
+
+// TestRelayStationsSansPubliqueLaisseEnDirect : plutot rendre la liste intacte que rendre une
+// forme qu on ne sait pas construire.
+func TestRelayStationsSansPubliqueLaisseEnDirect(t *testing.T) {
+	a := ParseStationURL("prudp:/address=192.168.1.20;port=1;CID=1")
+	b := ParseStationURL("prudp:/address=10.0.0.7;port=2;CID=2")
+	in := []*StationURL{a, b}
+
+	out := RelayStations(in, "51.178.29.194", 30700)
+	if len(out) != 2 || out[0] != a || out[1] != b {
+		t.Fatal("la liste devait revenir intacte")
+	}
+}
+
+// TestCollisionNExpulsePasLOccupant : le hachage tape dans un nombre fini de ports, donc deux
+// paires differentes y tombent regulierement ensemble. L ancien code reutilisait la socket de
+// l autre paire et ECRASAIT ses adresses attendues — l occupant, en pleine partie, se faisait
+// jeter. Avec vingt paires simultanees la probabilite est de l ordre de 20%.
+func TestCollisionNExpulsePasLOccupant(t *testing.T) {
+	// Un seul port disponible : toute deuxieme paire entre forcement en collision.
+	SetPairRelay("127.0.0.1", 39600, 1)
+	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 41, 42, 43, 44)
+
+	_, port1, ok := PairRelayFor(41, 42, "198.51.100.1", "198.51.100.2")
+	if !ok {
+		t.Fatal("la premiere paire n a pas pu s ouvrir")
+	}
+
+	// La seconde paire tombe sur le meme port : elle doit etre REFUSEE, pas servie.
+	if _, _, ok := PairRelayFor(43, 44, "203.0.113.1", "203.0.113.2"); ok {
+		t.Fatal("la seconde paire a recu le port de la premiere")
+	}
+
+	// Et l occupant doit etre intact : memes PID, memes adresses attendues.
+	pairSocksMu.Lock()
+	ps := pairSocks[port1]
+	pairSocksMu.Unlock()
+	if ps == nil {
+		t.Fatal("la socket de la premiere paire a disparu")
+	}
+	ps.mu.Lock()
+	att := ps.attendus
+	lo, hi := ps.pidLo, ps.pidHi
+	ps.mu.Unlock()
+
+	if lo != 41 || hi != 42 {
+		t.Fatalf("la socket appartient maintenant a %d/%d", lo, hi)
+	}
+	if att[0] != "198.51.100.1" || att[1] != "198.51.100.2" {
+		t.Fatalf("adresses attendues ecrasees: %v", att)
+	}
+}
+
+// TestCollisionSeDeplaceQuandIlYADeLaPlace : avec des ports libres a cote, la seconde paire
+// doit etre servie sur un autre port plutot que refusee.
+func TestCollisionSeDeplaceQuandIlYADeLaPlace(t *testing.T) {
+	SetPairRelay("127.0.0.1", 39700, 8)
+	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 51, 52, 53, 54)
+
+	_, p1, ok := PairRelayFor(51, 52, "198.51.100.1", "198.51.100.2")
+	if !ok {
+		t.Fatal("premiere paire refusee")
+	}
+	_, p2, ok := PairRelayFor(53, 54, "203.0.113.1", "203.0.113.2")
+	if !ok {
+		t.Fatal("seconde paire refusee alors qu il restait des ports")
+	}
+	if p1 == p2 {
+		t.Fatalf("les deux paires partagent le port %d", p1)
+	}
+}
+
+// TestMemePortDansLesDeuxSensApresDeplacement : l invariant que le hachage garantissait
+// gratuitement. Depuis qu une collision peut deplacer le port, il tient grace au registre —
+// et si les deux points d appel divergent, chaque console parle a une socket que l autre ne
+// lit pas.
+func TestMemePortDansLesDeuxSensApresDeplacement(t *testing.T) {
+	SetPairRelay("127.0.0.1", 39800, 8)
+	defer SetPairRelay("", 0, 0)
+	besoinPourTest(t, 61, 62, 63, 64)
+
+	// On occupe d abord le port prefere de la paire (63,64) pour forcer son deplacement.
+	PairRelayFor(61, 62, "198.51.100.1", "198.51.100.2")
+
+	_, a, ok := PairRelayFor(63, 64, "203.0.113.1", "203.0.113.2")
+	if !ok {
+		t.Fatal("paire refusee")
+	}
+	_, b, ok := PairRelayFor(64, 63, "203.0.113.2", "203.0.113.1")
+	if !ok {
+		t.Fatal("paire refusee dans l autre sens")
+	}
+	if a != b {
+		t.Fatalf("port %d dans un sens, %d dans l autre", a, b)
+	}
 }
