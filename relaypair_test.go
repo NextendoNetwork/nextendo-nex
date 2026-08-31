@@ -252,3 +252,44 @@ func TestRefuseUnAutreReseau(t *testing.T) {
 		t.Fatalf("rejets=%d, attendu 1", ps.rejets)
 	}
 }
+
+// TestPairRelayForOrdreStable : les deux points d appel nomment la paire dans des ordres
+// OPPOSES — GetSessionURLs avec (visiteur, hote), InitiateProbe avec (appelant, cible).
+// pairPortFor trie deja les PID ; si attendus ne les trie pas, la liste s inverse d un appel
+// a l autre et les deux joueurs finissent dans la meme place.
+// Mesure du 2026-08-31 : 3 paires sur 17 relayaient zero paquet a cause de ca.
+func TestPairRelayForOrdreStable(t *testing.T) {
+	SetPairRelay("127.0.0.1", 39000, 50)
+	defer SetPairRelay("", 0, 0)
+
+	const pidA, pidB = uint64(1800000123), uint64(1800024323)
+	ipA, ipB := "70.40.81.34", "181.78.0.151"
+
+	_, port1, ok := PairRelayFor(pidA, pidB, ipA, ipB)
+	if !ok {
+		t.Fatal("premier appel refuse")
+	}
+	// Le second appel nomme la MEME paire dans l autre sens.
+	_, port2, ok := PairRelayFor(pidB, pidA, ipB, ipA)
+	if !ok {
+		t.Fatal("second appel refuse")
+	}
+	if port1 != port2 {
+		t.Fatalf("la paire doit garder son port: %d puis %d", port1, port2)
+	}
+
+	pairSocksMu.Lock()
+	ps := pairSocks[port1]
+	pairSocksMu.Unlock()
+	if ps == nil {
+		t.Fatal("socket absente")
+	}
+	ps.mu.Lock()
+	att := ps.attendus
+	ps.mu.Unlock()
+
+	// pidA < pidB, donc l ordre attendu suit celui des PID quel que soit l appelant.
+	if att[0] != ipA || att[1] != ipB {
+		t.Fatalf("attendus inverses par le second appel: %v", att)
+	}
+}

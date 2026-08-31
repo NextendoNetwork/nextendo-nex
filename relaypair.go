@@ -153,8 +153,23 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	}
 	pairSocksMu.Unlock()
 
+	// Les adresses attendues sont rangees DANS L ORDRE DES PID, comme pairPortFor range
+	// deja lo/hi pour que la paire tombe toujours sur le meme port.
+	//
+	// Sans ce tri, la liste s inversait d un appel a l autre : GetSessionURLs appelle avec
+	// (visiteur, hote), InitiateProbe avec (appelant, cible) — souvent (hote, visiteur). Les
+	// places deja occupees, elles, ne bougeaient pas : le joueur assis en place 2 devenait
+	// l occupant attendu de la place 1, et le suivi de port le deplacait. Les deux joueurs
+	// finissaient dans la MEME place, l autre restait vide, et la paire ne relayait plus
+	// rien. Mesure du 2026-08-31 : 3 paires sur 17 a relayes=0, rejets=0 — invisibles sans
+	// les compteurs, et fatales puisque le candidat direct est deja remplace.
+	attA, attB := ipA, ipB
+	if pidA > pidB {
+		attA, attB = ipB, ipA
+	}
+
 	ps.mu.Lock()
-	ps.attendus = [2]string{ipA, ipB}
+	ps.attendus = [2]string{attA, attB}
 	ps.dernier = time.Now()
 	if ps.rejetVu == nil {
 		ps.rejetVu = map[string]uint64{}
