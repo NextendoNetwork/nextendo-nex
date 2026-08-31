@@ -202,3 +202,53 @@ func TestApparierRefuseUneIPEtrangere(t *testing.T) {
 		t.Fatalf("le refus doit etre trace par source: %v", ps.rejetVu)
 	}
 }
+
+// TestAdmisMemeBlocCGNAT : le jeu emet son UDP par une autre sortie que la connexion NEX.
+// Mesure du 2026-08-31 : attendu 45.186.208.118, recu de 45.186.208.68, 88 paquets jetes.
+func TestAdmisMemeBlocCGNAT(t *testing.T) {
+	ps := &pairSocket{port: 30600, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"45.186.208.118", "79.117.187.216"}
+
+	cgnat := &net.UDPAddr{IP: net.ParseIP("45.186.208.68"), Port: 62483}
+	autre := &net.UDPAddr{IP: net.ParseIP("79.117.187.216"), Port: 5000}
+
+	if dst := ps.apparier(cgnat); dst != nil {
+		t.Fatalf("premier paquet: pas encore de pair, obtenu %v", dst)
+	}
+	if ps.rejets != 0 {
+		t.Fatalf("le meme /24 doit etre admis, rejets=%d", ps.rejets)
+	}
+	if dst := ps.apparier(autre); dst == nil || dst.Port != 62483 {
+		t.Fatalf("doit relayer vers la source CGNAT apprise, obtenu %v", dst)
+	}
+}
+
+// TestPasDeRemapEntreDeuxJoueursDuMemeBloc : si les deux attendus partagent leur /24, ils ne
+// sont plus distinguables par reseau et suivre le port melangerait les flux.
+func TestPasDeRemapEntreDeuxJoueursDuMemeBloc(t *testing.T) {
+	ps := &pairSocket{port: 30601, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"88.1.2.3", "88.1.2.9"}
+
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.3"), Port: 1000})
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.9"), Port: 2000})
+
+	intrus := &net.UDPAddr{IP: net.ParseIP("88.1.2.77"), Port: 3000}
+	if dst := ps.apparier(intrus); dst != nil {
+		t.Fatalf("pas de remap quand les deux attendus partagent le /24, obtenu %v", dst)
+	}
+	if ps.remaps != 0 {
+		t.Fatalf("remaps=%d, attendu 0", ps.remaps)
+	}
+}
+
+// TestRefuseUnAutreReseau : le garde-fou d origine tient toujours.
+func TestRefuseUnAutreReseau(t *testing.T) {
+	ps := &pairSocket{port: 30602, rejetVu: map[string]uint64{}}
+	ps.attendus = [2]string{"1.1.1.1", "2.2.2.2"}
+	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.2.1"), Port: 9}); dst != nil {
+		t.Fatalf("un /24 different doit etre refuse, obtenu %v", dst)
+	}
+	if ps.rejets != 1 {
+		t.Fatalf("rejets=%d, attendu 1", ps.rejets)
+	}
+}

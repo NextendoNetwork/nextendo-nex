@@ -190,6 +190,34 @@ func (ps *pairSocket) boucle() {
 	}
 }
 
+// memeReseau dit si deux adresses IPv4 partagent leur /24.
+//
+// L admission comparait l IP EXACTE, et l IP attendue vient de la connexion NEX (le
+// WebSocket de controle) alors que le jeu emet son UDP par une autre sortie. Sous CGNAT les
+// deux diffèrent : mesure du 2026-08-31, une paire attendait 45.186.208.118 et recevait de
+// 45.186.208.68 — 88 paquets refuses, zero relaye, la partie morte.
+//
+// Le /24 est un compromis assume : il couvre les pools CGNAT sans ouvrir le port a tout
+// Internet. Le port reste dedie a UNE paire, tire au hasard parmi 900 et ferme apres deux
+// minutes de silence, donc ce qu on relache ici reste etroit.
+func memeReseau(a, b string) bool {
+	ipA, ipB := net.ParseIP(a), net.ParseIP(b)
+	if ipA == nil || ipB == nil {
+		return false
+	}
+	v4A, v4B := ipA.To4(), ipB.To4()
+	if v4A == nil || v4B == nil {
+		return false // IPv6 : pas de /24 qui ait du sens ici
+	}
+
+	return v4A[0] == v4B[0] && v4A[1] == v4B[1] && v4A[2] == v4B[2]
+}
+
+// admis dit si une source peut prendre la place i : IP exacte, ou meme /24 (CGNAT).
+func admis(attendu, src string) bool {
+	return attendu == src || memeReseau(attendu, src)
+}
+
 // apparier rend l autre extremite pour un paquet donne, en apprenant les endpoints au fil
 // de l eau et en refusant tout ce qui ne vient pas des deux adresses attendues.
 func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
@@ -207,7 +235,7 @@ func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
 	// seulement pour la place encore libre. Sans ce garde-fou, n importe quel scanner
 	// s inserant sur le port detournerait la partie de deux joueurs.
 	for i, ip := range ps.attendus {
-		if ip == src.IP.String() && ps.vus[i] == nil {
+		if admis(ip, src.IP.String()) && ps.vus[i] == nil {
 			ps.vus[i] = src
 			fmt.Printf("[relais-paire] :%d extremite %d = %s\n", ps.port, i+1, src)
 
@@ -222,9 +250,12 @@ func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
 	// Uniquement quand les deux IP attendues DIFFERENT : si les deux joueurs partagent une
 	// IP publique (meme foyer, CGNAT), le port est le seul discriminant et le suivre
 	// melangerait les deux flux.
-	if ps.attendus[0] != ps.attendus[1] {
+	// Le remappage n est sur que si les deux attendus sont distinguables PAR RESEAU. Depuis
+	// que l admission accepte le /24, deux joueurs du meme bloc ne le sont plus : suivre le
+	// port melangerait leurs deux flux dans la meme partie.
+	if !memeReseau(ps.attendus[0], ps.attendus[1]) && ps.attendus[0] != ps.attendus[1] {
 		for i, ip := range ps.attendus {
-			if ip == src.IP.String() && ps.vus[i] != nil {
+			if admis(ip, src.IP.String()) && ps.vus[i] != nil {
 				ancien := ps.vus[i]
 				ps.vus[i] = src
 				ps.remaps++
