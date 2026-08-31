@@ -475,6 +475,43 @@ func (ps *pairSocket) inactifDepuis(d time.Duration) bool {
 	return time.Since(ps.dernier) > d
 }
 
+// bilanEtCumul imprime le bilan d une paire qui se ferme et l ajoute au cumul.
+//
+// Appelee par le faucheur ET par le desarmement. Le 2026-08-31, un essai rate sur Mario Kart
+// a ete desarme en urgence : les ports se sont fermes sans rien dire, et les compteurs — les
+// seuls a pouvoir dire si le trafic avait traverse — sont partis avec eux. On ne savait donc
+// meme pas ce qui avait echoue. Un relais qu on eteint doit dire ce qu il a fait.
+//
+// L appelant tient deja pairSocksMu.
+func bilanEtCumul(ps *pairSocket, port int, motif string) {
+	ps.mu.Lock()
+	recus, relayes, rejets, remaps := ps.recus, ps.relayes, ps.rejets, ps.remaps
+	detail := ""
+	for src, n := range ps.rejetVu {
+		detail += fmt.Sprintf(" %s×%d", src, n)
+	}
+	attendus := ps.attendus
+	places := [2]string{}
+	for i, vu := range ps.vus {
+		if vu != nil {
+			places[i] = vu.String()
+		}
+	}
+	ps.mu.Unlock()
+
+	pairTotal.Recus += recus
+	pairTotal.Relayes += relayes
+	pairTotal.Rejets += rejets
+	pairTotal.Remaps += remaps
+	if relayes == 0 {
+		pairTotal.PairesMuettes++
+	}
+
+	fmt.Printf("[relais-paire] :%d ferme (%s) — recus=%d relayes=%d rejets=%d remaps=%d (attendus %s / %s ; vus %q / %q)%s\n",
+		port, motif, recus, relayes, rejets, remaps,
+		attendus[0], attendus[1], places[0], places[1], detail)
+}
+
 // reapPairSockets ferme les ports dont la paire ne parle plus. Sans lui, une soiree
 // chargee laisserait un socket ouvert par partie jouee depuis le demarrage.
 func reapPairSockets() {
@@ -493,25 +530,7 @@ func reapPairSockets() {
 				// porte une partie ou si elle a jete le trafic. Les refus sont
 				// detailles par source, parce que « qui a ete refuse » est la
 				// question, pas « combien ».
-				ps.mu.Lock()
-				recus, relayes, rejets, remaps := ps.recus, ps.relayes, ps.rejets, ps.remaps
-				detail := ""
-				for src, n := range ps.rejetVu {
-					detail += fmt.Sprintf(" %s×%d", src, n)
-				}
-				attendus := ps.attendus
-				ps.mu.Unlock()
-
-				pairTotal.Recus += recus
-				pairTotal.Relayes += relayes
-				pairTotal.Rejets += rejets
-				pairTotal.Remaps += remaps
-				if relayes == 0 {
-					pairTotal.PairesMuettes++
-				}
-
-				fmt.Printf("[relais-paire] :%d ferme — recus=%d relayes=%d rejets=%d remaps=%d (attendus %s / %s)%s\n",
-					port, recus, relayes, rejets, remaps, attendus[0], attendus[1], detail)
+				bilanEtCumul(ps, port, "silencieux")
 			}
 		}
 		// Bilan periodique. Le bilan par paire n arrive qu a sa fermeture, jusqu a deux
@@ -552,6 +571,7 @@ func closeAllPairSockets() {
 
 	for port, ps := range pairSocks {
 		ps.conn.Close()
+		bilanEtCumul(ps, port, "desarmement")
 		delete(pairSocks, port)
 	}
 	// Sinon une paire desarmee puis rearmee retrouverait un port dont la socket n existe

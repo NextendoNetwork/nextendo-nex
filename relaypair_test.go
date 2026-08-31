@@ -576,3 +576,40 @@ func TestMemePortDansLesDeuxSensApresDeplacement(t *testing.T) {
 		t.Fatalf("port %d dans un sens, %d dans l autre", a, b)
 	}
 }
+
+// TestDesarmementVolcaLeBilan : eteindre le relais en urgence ne doit pas emporter les
+// compteurs. Mesure du 2026-08-31 : un essai rate sur Mario Kart a ete desarme aussitot, les
+// ports se sont fermes en silence, et on ne savait meme pas si le trafic avait traverse.
+func TestDesarmementVolcaLeBilan(t *testing.T) {
+	SetPairRelay("127.0.0.1", 42000, 20)
+	besoinPourTest(t, 301, 302)
+
+	_, port, ok := PairRelayFor(301, 302, "127.0.0.1", "127.0.0.1")
+	if !ok {
+		t.Fatal("port non ouvert")
+	}
+	relais := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+
+	a := dialUDP(t)
+	defer a.Close()
+	b := dialUDP(t)
+	defer b.Close()
+	a.WriteToUDP([]byte("un"), relais)
+	b.WriteToUDP([]byte("deux"), relais)
+	lireUDP(t, a, "deux vers a")
+
+	avant := PairRelayStats().Total
+
+	// Desarmement : c est ici que les compteurs se perdaient.
+	SetPairRelay("", 0, 0)
+
+	apres := PairRelayStats().Total
+	if apres.Recus <= avant.Recus {
+		t.Fatalf("les paquets recus n ont pas ete cumules au desarmement (%d -> %d)",
+			avant.Recus, apres.Recus)
+	}
+	if apres.Relayes <= avant.Relayes {
+		t.Fatalf("les paquets relayes n ont pas ete cumules (%d -> %d)",
+			avant.Relayes, apres.Relayes)
+	}
+}
