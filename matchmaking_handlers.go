@@ -630,6 +630,7 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 
 	m.mu.Lock()
 	var g *gathering
+	var repli *gathering // salon dont l'hote est momentanement absent : accepte en dernier recours
 	skippedNAT := 0
 	// [Nextendo] A solo-isolated PID (NEX_SOLO_PIDS) never joins an existing lobby: it always
 	// opens its own gathering. Gives a private test account a reliable solo online lobby on a
@@ -648,10 +649,33 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 					skippedNAT++
 					continue
 				}
+				// [Nextendo] PREFERER un salon dont l'hote est en ligne.
+				//
+				// Un joueur deconnecte garde sa place quelques secondes (voir le delai de
+				// grace cote jeu), le temps que sa console rouvre sa connexion. Pendant ce
+				// delai son salon reste joignable, et un arrivant pouvait y entrer pour
+				// attendre quelqu'un qui ne revenait pas : la partie ne demarrait qu'au
+				// DEUXIEME essai, apres expiration du delai.
+				//
+				// C'est une PREFERENCE et non un refus. Exiger un hote connecte remettrait
+				// chacun dans son propre salon des que l'hote cligne des yeux, ce qui est
+				// exactement la fragmentation qu'on vient de corriger : tout le monde
+				// cherche en meme temps et personne ne se rencontre. On garde donc le salon
+				// a hote absent comme repli, utilise seulement si c'est le seul disponible.
+				if ep != nil && ep.FindConnectionByPID(cand.session.OwnerPID) == nil {
+					if repli == nil {
+						repli = cand
+					}
+
+					continue
+				}
 				g = cand
 				break
 			}
 		}
+	}
+	if g == nil && repli != nil {
+		g = repli
 	}
 	joined := false
 	if g == nil {
@@ -1066,10 +1090,47 @@ func (m *Matchmaking) setParticipation(conn *Connection, req *RMCMessage, open b
 
 	m.mu.Lock()
 	g := m.gatherings[gid]
+	var elagues []uint64
 	if g != nil && g.session != nil {
 		g.session.OpenParticipation = open
+
+		// [Nextendo] A LA FERMETURE, on retire les participants injoignables.
+		//
+		// Tant qu'on cherche, un joueur deconnecte garde sa place : sa console rouvre sa
+		// connexion sans arret et le retirer aussitot vidait les salons (voir le delai de
+		// grace cote jeu). Mais fermer la participation, c'est arreter de chercher et
+		// commencer la partie — et a cet instant la liste cesse d'etre une file d'attente
+		// pour devenir la COMPOSITION du match.
+		//
+		// Un absent qui y reste est bien pire qu'un salon a moitie vide : mesure du
+		// 2026-09-02 sur SMM2, un salon annonce a quatre dont seules trois consoles
+		// appelaient StartBattleMode. Les autres attendaient un joueur qui n'arriverait
+		// jamais, la partie ne se terminait pas, et a l'ecran ca donnait « on arrive au but
+		// et il ne se passe rien ».
+		//
+		// Celui qui ferme est toujours garde : c'est lui qui parle, il est donc la.
+		if !open && conn.Endpoint != nil {
+			vivants := make([]uint64, 0, len(g.participants))
+			for _, pid := range g.participants {
+				if pid == conn.PID || conn.Endpoint.FindConnectionByPID(pid) != nil {
+					vivants = append(vivants, pid)
+
+					continue
+				}
+				elagues = append(elagues, pid)
+			}
+			if len(elagues) > 0 {
+				g.participants = vivants
+				g.session.NumParticipants = uint32(len(vivants))
+			}
+		}
 	}
 	m.mu.Unlock()
+
+	if len(elagues) > 0 {
+		fmt.Printf("[MM] fermeture gid=%d : %d participant(s) injoignable(s) retire(s) %v -> match a %d\n",
+			gid, len(elagues), elagues, len(g.participants))
+	}
 
 	what := "Close"
 	if open {
