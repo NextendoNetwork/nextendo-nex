@@ -23,21 +23,8 @@ import (
 // a legitimate login is never rejected over a framing mismatch — only over a missing
 // or wrong proof.
 func NexTokenFromLoginExtraData(extraData []byte) (string, bool) {
-	i := bytes.Index(extraData, []byte("eyJ"))
-	if i < 0 {
-		return "", false
-	}
-	j := i
-	for j < len(extraData) && isJWTByte(extraData[j]) {
-		j++
-	}
-	segments := bytes.Split(extraData[i:j], []byte("."))
-	if len(segments) < 2 {
-		return "", false
-	}
-	// JWT segments are unpadded base64url; TrimRight tolerates a padded encoder too.
-	payload, err := base64.RawURLEncoding.DecodeString(string(bytes.TrimRight(segments[1], "=")))
-	if err != nil {
+	payload, ok := decodeLoginJWTPayload(extraData)
+	if !ok {
 		return "", false
 	}
 	var claims struct {
@@ -47,6 +34,42 @@ func NexTokenFromLoginExtraData(extraData []byte) (string, bool) {
 		return "", false
 	}
 	return claims.Nnex, true
+}
+
+// TitleVersionFromLoginExtraData extracts the "tv" claim (installed title-update version,
+// e.g. "13.0.5") the client embeds in its BAAS id_token, if present.
+func TitleVersionFromLoginExtraData(extraData []byte) (string, bool) {
+	payload, ok := decodeLoginJWTPayload(extraData)
+	if !ok {
+		return "", false
+	}
+	var claims struct {
+		Tv string `json:"tv"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Tv == "" {
+		return "", false
+	}
+	return claims.Tv, true
+}
+
+func decodeLoginJWTPayload(extraData []byte) ([]byte, bool) {
+	i := bytes.Index(extraData, []byte("eyJ"))
+	if i < 0 {
+		return nil, false
+	}
+	j := i
+	for j < len(extraData) && isJWTByte(extraData[j]) {
+		j++
+	}
+	segments := bytes.Split(extraData[i:j], []byte("."))
+	if len(segments) < 2 {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(string(bytes.TrimRight(segments[1], "=")))
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
 // isJWTByte reports whether b is a valid character inside a compact JWS/JWT
