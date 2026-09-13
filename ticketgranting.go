@@ -230,6 +230,21 @@ type AuthConfig struct {
 	// pSourceKey, so the client can decrypt without a shared password). Return
 	// ok=false to reject the login.
 	ResolveUser func(username string, extraData []byte) (pid uint64, sourceKey []byte, ok bool)
+
+	// ResolveUserEx, when set, replaces ResolveUser and lets the caller pick the result
+	// code a rejection returns. A zero result means success.
+	ResolveUserEx func(username string, extraData []byte) (pid uint64, sourceKey []byte, result uint32)
+}
+
+func (cfg *AuthConfig) resolve(username string, extraData []byte) (uint64, []byte, uint32) {
+	if cfg.ResolveUserEx != nil {
+		return cfg.ResolveUserEx(username, extraData)
+	}
+	pid, sourceKey, ok := cfg.ResolveUser(username, extraData)
+	if !ok {
+		return 0, nil, ResultAuthTokenParseError
+	}
+	return pid, sourceKey, 0
 }
 
 // Handler returns the RMC handler for the TicketGranting protocol (0x0A).
@@ -268,9 +283,9 @@ func (cfg *AuthConfig) handleLoginWithContext(conn *Connection, req *RMCMessage)
 	extraData := in.ReadAll()
 	fmt.Printf("[Auth] ValidateAndRequestTicketWithParam username=%q extraDataLen=%d\n", username, len(extraData))
 
-	pid, sourceKey, ok := cfg.ResolveUser(username, extraData)
-	if !ok {
-		return NewRMCError(s, ProtocolTicketGranting, req.CallID, ResultAuthTokenParseError)
+	pid, sourceKey, rc := cfg.resolve(username, extraData)
+	if rc != 0 {
+		return NewRMCError(s, ProtocolTicketGranting, req.CallID, rc)
 	}
 	if conn != nil {
 		RememberAuthPID(conn.RemoteAddr, pid)
@@ -333,9 +348,9 @@ func (cfg *AuthConfig) handleLogin(conn *Connection, req *RMCMessage) *RMCMessag
 
 	fmt.Printf("[Auth] LoginEx username=%q (len=%d) extraDataLen=%d\n", username, len(username), len(extraData))
 
-	pid, sourceKey, ok := cfg.ResolveUser(username, extraData)
-	if !ok {
-		return fail(ResultAuthTokenParseError)
+	pid, sourceKey, rc := cfg.resolve(username, extraData)
+	if rc != 0 {
+		return fail(rc)
 	}
 
 	// Remember this PID so the ticket-less secure connection from the same client
