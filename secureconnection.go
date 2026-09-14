@@ -21,6 +21,7 @@ const (
 	// six heures, seule erreur du journal. Le manque touche TOUS les jeux NEX, pas un
 	// seul — c'est notre bibliotheque qui est incomplete, pas leur serveur.
 	MethodTestConnectivity uint32 = 0x5
+	MethodSendReport       uint32 = 0x8
 )
 
 // StationURL type flags.
@@ -92,6 +93,9 @@ func SecureConnectionHandlerWithConfig(cfg SecureConnectionConfig) RMCHandler {
 			return handleRegister(conn, req, cfg)
 		case MethodReplaceURL:
 			return handleReplaceURLWithConfig(conn, req, cfg)
+		case MethodSendReport:
+			fmt.Printf("[SecureConnection] SendReport pid=%d bodyLen=%d -> ack\n", conn.PID, len(req.Body))
+			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)
 		case MethodTestConnectivity:
 			// Reponse vide et succes : la connexion existe, puisqu'on repond dessus.
 			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)

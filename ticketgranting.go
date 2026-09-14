@@ -234,6 +234,9 @@ type AuthConfig struct {
 	// ResolveUserEx, when set, replaces ResolveUser and lets the caller pick the result
 	// code a rejection returns. A zero result means success.
 	ResolveUserEx func(username string, extraData []byte) (pid uint64, sourceKey []byte, result uint32)
+
+	// ContextResultTrailingU64 appends a zero u64 after SourceKey in method 0x6's result (MHGU).
+	ContextResultTrailingU64 bool
 }
 
 func (cfg *AuthConfig) resolve(username string, extraData []byte) (uint64, []byte, uint32) {
@@ -325,6 +328,9 @@ func (cfg *AuthConfig) handleLoginWithContext(conn *Connection, req *RMCMessage)
 	content.DateTime(NowDateTime().Value())                  // CurrentUTCTime
 	content.String(cfg.ServerName)                           // ReturnMsg
 	content.String(hex.EncodeToString(sourceKey))            // SourceKey (client decrypts the ticket with it)
+	if cfg.ContextResultTrailingU64 {
+		content.U64(0)
+	}
 	body := content.Bytes()
 
 	out := NewStreamOut(s)

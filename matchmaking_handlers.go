@@ -60,6 +60,9 @@ const (
 	// overflow) — the exact wall Turf War hit the moment lobbies could finally fill to 8.
 	MethodModifyCurrentGameAttribute uint32 = 0x08
 
+	// UpdateMatchmakeSessionAttribute(gid, attribs List<u32>): MHGU's host calls it while loading into its hub.
+	MethodUpdateMatchmakeSessionAttribute uint32 = 0x0C
+
 	// UpdateMatchmakeSessionPart(param) is what Splatoon 2 calls at the END of a Salmon Run
 	// co-op session, after the result report, to run its finish transition. It updates a
 	// subset of the session it no longer needs us to keep — nothing downstream reads it, so
@@ -183,6 +186,9 @@ type Matchmaking struct {
 	// qu'on ne touche pas a cette heure-ci.
 	NotifierDeparts bool
 
+	// OwnerLeaveUnregisters sends GatheringUnregistered to everyone left in a lobby whose owner left without migrating, and answers GetSessionURLs on it with SessionVoid.
+	OwnerLeaveUnregisters bool
+
 	// Endpoint sert a joindre le proprietaire d'un salon depuis RemovePlayer, qui ne
 	// recoit qu'un PID. Pose par le serveur de jeu en meme temps que NotifierDeparts.
 	Endpoint *Endpoint
@@ -239,6 +245,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.updateApplicationBuffer(conn, req)
 		case MethodModifyCurrentGameAttribute:
 			return m.modifyCurrentGameAttribute(conn, req)
+		case MethodUpdateMatchmakeSessionAttribute:
+			return m.updateMatchmakeSessionAttribute(conn, req)
 		case MethodSSBUArenaCode:
 			// SSBU arena code create — identical { String code, DateTime } struct as MK8 0x44.
 			return m.privateRoomCreate(conn, req)
@@ -980,6 +988,9 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 		host = conn.Endpoint.FindConnectionByID(g.hostConnID)
 	}
 
+	if g == nil && m.OwnerLeaveUnregisters {
+		return NewRMCError(s, ProtocolMatchMaking, req.CallID, ResultRendezVousSessionVoid)
+	}
 	if host == nil {
 		return sessionURLsResponse(conn, req, nil)
 	}
@@ -1262,6 +1273,26 @@ func (m *Matchmaking) modifyCurrentGameAttribute(conn *Connection, req *RMCMessa
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, nil)
 }
 
+// updateMatchmakeSessionAttribute replaces a gathering's attribute list (owner-only) and always acks.
+func (m *Matchmaking) updateMatchmakeSessionAttribute(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	in := NewStreamIn(req.Body, s)
+	gid := in.U32()
+	attribs := ReadList(in, func(i *StreamIn) uint32 { return i.U32() })
+
+	applied := false
+	m.mu.Lock()
+	if g := m.gatherings[gid]; g != nil && g.session != nil && len(g.participants) > 0 && g.participants[0] == conn.PID && in.Err() == nil {
+		g.session.Attribs = append([]uint32(nil), attribs...)
+		applied = true
+	}
+	m.mu.Unlock()
+
+	fmt.Printf("[MM] UpdateMatchmakeSessionAttribute pid=%d gid=%d attribs=%v applied=%v -> ack\n", conn.PID, gid, attribs, applied)
+
+	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, nil)
+}
+
 // migrateGatheringOwnership implements MatchMaking MigrateGatheringOwnership (0x2C=44) and its V1
 // (0x24=36). The owner is handing the gathering off: pick the new owner from the potential_owners
 // list (the first that is still a participant) and move it to the front (index 0 = owner in this
@@ -1352,6 +1383,7 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 		participants    []uint64
 	}
 	var aMigrer []migration
+	var orphans []migration
 
 	m.mu.Lock()
 	for gid, g := range m.gatherings {
@@ -1385,6 +1417,9 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 		// SMB35 le pose (flags=0x210).
 		if g.session.Gathering.OwnerPID == pid {
 			if !m.NotifierDeparts || g.session.Gathering.Flags&0x10 == 0 {
+				if m.OwnerLeaveUnregisters {
+					orphans = append(orphans, migration{gid: gid, ancien: pid, participants: append([]uint64(nil), g.participants...)})
+				}
 				delete(m.gatherings, gid)
 				if g.code != "" {
 					delete(m.byCode, g.code)
@@ -1436,6 +1471,20 @@ func (m *Matchmaking) RemovePlayer(pid uint64) {
 				Param1:    uint64(mg.gid),
 				Param2:    mg.nouveau,
 			})
+		}
+	}
+
+	for _, o := range orphans {
+		for _, p := range o.participants {
+			if m.Endpoint == nil {
+				break
+			}
+			c := m.Endpoint.FindConnectionByPID(p)
+			if c == nil {
+				continue
+			}
+			SendNotification(c, &NotificationEvent{PIDSource: o.ancien, Type: NotificationGatheringUnregistered, Param1: uint64(o.gid)})
+			fmt.Printf("[MM] disconnect pid=%d -> GatheringUnregistered gid=%d sent to %d\n", o.ancien, o.gid, p)
 		}
 	}
 
