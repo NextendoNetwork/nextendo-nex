@@ -66,7 +66,11 @@ func (s *Server) OnMessage(socket *gws.Conn, message *gws.Message) {
 
 func (s *Server) mux() *http.ServeMux {
 	upgrader := gws.NewUpgrader(s, &gws.ServerOption{
-		ParallelEnabled: true,
+		// PRUDP requires a connection's frames to be processed strictly in order:
+		// parallel frame handling raced recvBuf/fragBuf and reordered fragments, so any
+		// login large enough to span two WS frames (a signed token in extraData) was
+		// dropped. Different connections are still handled concurrently by gws.
+		ParallelEnabled: false,
 		Recovery:        gws.Recovery,
 		ReadBufferSize:  64 * 1024,
 		WriteBufferSize: 64 * 1024,
