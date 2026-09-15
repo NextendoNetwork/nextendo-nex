@@ -115,8 +115,8 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 	//
 	// Left off for the titles whose clients already advertise their own public
 	// endpoint (their probes work as-is); enabled per game server.
-	if probeRepointEnabled() {
-		if host, _, err := splitHostPortSafe(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
+	if host, _, err := splitHostPortSafe(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
+		if probeRepointEnabled() || overlayStation(conn, ParseStationURL(stationToProbe).Get("address"), host) {
 			u := ParseStationURL(stationToProbe)
 			if u.Get("address") != host {
 				u.Set("address", host)
@@ -169,6 +169,23 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			conn.PID, target.PID, target.ID, rvcid, station)
 		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps))
 	}
+}
+
+// overlayStation reports whether addr is a VPN-adapter address the caller registered alongside its observed public one.
+func overlayStation(conn *Connection, addr, host string) bool {
+	if addr == "" || addr == host || isPrivateIP(addr) {
+		return false
+	}
+	seenAddr, seenHost := false, false
+	for _, st := range conn.Stations() {
+		switch st.Get("address") {
+		case addr:
+			seenAddr = true
+		case host:
+			seenHost = true
+		}
+	}
+	return seenAddr && seenHost
 }
 
 // logNATResult records the console's own verdict on the hole-punch.
