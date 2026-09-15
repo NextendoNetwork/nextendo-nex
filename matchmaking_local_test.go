@@ -172,3 +172,68 @@ func TestDelayedParticipationDropsRemovedRoom(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+func TestDelayedParticipationNotifiesWithoutMatchmakingLock(t *testing.T) {
+	s := testSettings()
+	ep := NewEndpoint(s)
+	lockAvailable := make(chan bool, 1)
+	var mm *Matchmaking
+	caller := NewConnection(ep, "127.0.0.1:12345", func([]byte) {
+		if mm != nil && mm.mu.TryLock() {
+			mm.mu.Unlock()
+			lockAvailable <- true
+			return
+		}
+		lockAvailable <- false
+	})
+	caller.PID = 1001
+	ep.registerConnection(caller)
+	mm = NewMatchmaking()
+	mm.ParticipationNotificationDelay = 10 * time.Millisecond
+	mm.gatherings[1] = &gathering{participants: []uint64{caller.PID}}
+
+	mm.notifyParticipationWithDelay(caller, []uint64{caller.PID}, 1)
+	select {
+	case available := <-lockAvailable:
+		if !available {
+			t.Fatal("notification was sent while the matchmaking lock was held")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notification never arrived")
+	}
+}
+
+func TestDelayedParticipationFiltersDepartedParticipant(t *testing.T) {
+	s := testSettings()
+	ep := NewEndpoint(s)
+	callerSent := make(chan struct{}, 4)
+	remainingSent := make(chan struct{}, 4)
+	departedSent := make(chan struct{}, 4)
+	caller := NewConnection(ep, "127.0.0.1:12345", func([]byte) { callerSent <- struct{}{} })
+	departed := NewConnection(ep, "127.0.0.1:12346", func([]byte) { departedSent <- struct{}{} })
+	remaining := NewConnection(ep, "127.0.0.1:12347", func([]byte) { remainingSent <- struct{}{} })
+	caller.PID, departed.PID, remaining.PID = 1001, 1002, 1003
+	ep.registerConnection(caller)
+	ep.registerConnection(departed)
+	ep.registerConnection(remaining)
+	mm := NewMatchmaking()
+	mm.ParticipationNotificationDelay = 20 * time.Millisecond
+	mm.gatherings[1] = &gathering{participants: []uint64{caller.PID, remaining.PID}}
+
+	mm.notifyParticipationWithDelay(caller, []uint64{caller.PID, departed.PID, remaining.PID}, 1)
+	select {
+	case <-remainingSent:
+	case <-time.After(time.Second):
+		t.Fatal("remaining participant was not notified")
+	}
+	select {
+	case <-departedSent:
+		t.Fatal("departed participant was notified")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-callerSent:
+	default:
+		t.Fatal("caller was not notified")
+	}
+}

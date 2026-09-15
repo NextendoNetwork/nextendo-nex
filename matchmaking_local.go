@@ -13,18 +13,25 @@ func (m *Matchmaking) notifyParticipationWithDelay(caller *Connection, participa
 	parts := append([]uint64(nil), participants...)
 	time.AfterFunc(m.ParticipationNotificationDelay, func() {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		g := m.gatherings[gid]
 		if g == nil || !containsPID(g.participants, caller.PID) || caller.Endpoint.FindConnectionByPID(caller.PID) != caller {
+			m.mu.Unlock()
 			return
 		}
-		// A player may have left while the notification was waiting.
+		// A player may have left while the notification was waiting. Keep the
+		// original snapshot order, but do not let one departure suppress the
+		// notification for everyone who is still in the gathering.
+		remaining := make([]uint64, 0, len(parts))
 		for _, pid := range parts {
-			if !containsPID(g.participants, pid) {
-				return
+			if containsPID(g.participants, pid) {
+				remaining = append(remaining, pid)
 			}
 		}
-		m.notifyParticipation(caller, parts, gid, "")
+		m.mu.Unlock()
+
+		// Match the existing matchmaking call sites: socket writes and callbacks
+		// must run outside the matchmaking critical section.
+		m.notifyParticipation(caller, remaining, gid, "")
 	})
 }
 
