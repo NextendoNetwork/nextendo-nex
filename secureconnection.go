@@ -21,6 +21,7 @@ const (
 	// six heures, seule erreur du journal. Le manque touche TOUS les jeux NEX, pas un
 	// seul — c'est notre bibliotheque qui est incomplete, pas leur serveur.
 	MethodTestConnectivity uint32 = 0x5
+	MethodSendReport       uint32 = 0x8
 )
 
 // StationURL type flags.
@@ -88,6 +89,9 @@ func SecureConnectionHandlerWithConfig(cfg SecureConnectionConfig) RMCHandler {
 			return handleRegister(conn, req, cfg)
 		case MethodReplaceURL:
 			return handleReplaceURL(conn, req)
+		case MethodSendReport:
+			fmt.Printf("[SecureConnection] SendReport pid=%d bodyLen=%d -> ack\n", conn.PID, len(req.Body))
+			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)
 		case MethodTestConnectivity:
 			// Reponse vide et succes : la connexion existe, puisqu'on repond dessus.
 			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)
@@ -105,6 +109,12 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 	local, public := selectStations(urls)
 	if local == nil {
 		local = NewStationURL("prudp")
+	}
+	// A VPN adapter address (Radmin 26.x) reads as public; derive the real one from the observed endpoint.
+	if public == local {
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr); err == nil && !isPrivateIP(host) && local.Get("address") != host {
+			public = nil
+		}
 	}
 	// derivedPublic: the client reported no public station, so we synthesised one from
 	// the observed endpoint. It changes what Pa must be — see the Pa comment below.
@@ -218,7 +228,7 @@ func selectStations(urls []*StationURL) (local, public *StationURL) {
 			if local == nil {
 				local = u
 			}
-		} else if public == nil {
+		} else if public == nil || (uint8(public.GetInt("type"))&StationURLFlagPublic == 0 && uint8(u.GetInt("type"))&StationURLFlagPublic != 0) {
 			public = u
 		}
 	}
