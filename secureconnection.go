@@ -36,6 +36,10 @@ const (
 // The right values are GAME-SPECIFIC — they follow the title's Pia version, not our
 // preference — so each game passes what its proven server was measured to send.
 type SecureConnectionConfig struct {
+	// PreservePiaStationIdentity keeps Register's public endpoint while ReplaceURL
+	// supplies the per-connection UDP endpoint and CID. MPS compares this identity
+	// with the host's later Pia mesh update. Enable with the matchmaking option.
+	PreservePiaStationIdentity bool
 	// PublicStationType is the `type` param on the public station. Switch Pia 5.19 (SSBU)
 	// wants 0x0B (BehindNAT|Public|Switch); older Pia (Splatoon 2) wants the Wii U-era 0x03
 	// (BehindNAT|Public). Wire measured with the client held constant: the proven S2 server
@@ -87,7 +91,7 @@ func SecureConnectionHandlerWithConfig(cfg SecureConnectionConfig) RMCHandler {
 		case MethodRegister, MethodRegisterEx:
 			return handleRegister(conn, req, cfg)
 		case MethodReplaceURL:
-			return handleReplaceURL(conn, req)
+			return handleReplaceURLWithConfig(conn, req, cfg)
 		case MethodTestConnectivity:
 			// Reponse vide et succes : la connexion existe, puisqu'on repond dessus.
 			return NewRMCSuccess(conn.Settings, ProtocolSecureConnection, req.Method, req.CallID, nil)
@@ -171,6 +175,10 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 // by ADDRESS with the new url winning for its address (keeps the fresh LAN url,
 // removes stale duplicates), matching the proven server.
 func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
+	return handleReplaceURLWithConfig(conn, req, SecureConnectionConfig{})
+}
+
+func handleReplaceURLWithConfig(conn *Connection, req *RMCMessage, cfg SecureConnectionConfig) *RMCMessage {
 	s := conn.Settings
 	in := NewStreamIn(req.Body, s)
 	_ = in.StationURLValue() // target (the url being replaced) — unused; we dedupe by address
@@ -179,6 +187,31 @@ func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
 		return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
 	}
 	newStation.SetInt("PID", int(conn.PID))
+	if cfg.PreservePiaStationIdentity {
+		local, public := selectStations(conn.Stations())
+		if local != nil && public != nil && newStation.GetInt("CID") != 0 &&
+			newStation.GetInt("port") > 0 && newStation.GetInt("port") <= 65535 {
+			// The public ReplaceURL carries the real UDP port, but MPS's own
+			// location retains the public endpoint returned by Register. Copy the
+			// fresh CID/NAT metadata to both candidates without changing that identity.
+			lan, pub := newStation.Copy(), newStation.Copy()
+			lan.Set("address", local.Get("address"))
+			lan.Remove("type")
+			lan.Remove("Pa")
+			pub.Set("address", public.Get("address"))
+			pub.Set("port", public.Get("port"))
+			pub.Set("type", public.Get("type"))
+			if pa := public.Get("Pa"); pa != "" {
+				pub.Set("Pa", pa)
+			}
+			lan.SetInt("RVCID", int(conn.ID))
+			pub.SetInt("RVCID", int(conn.ID))
+			conn.SetStations([]*StationURL{lan, pub})
+			fmt.Printf("[PiaIdentity] pid=%d rvcid=%d public=%s:%s private=%s:%s cid=%s\n",
+				conn.PID, conn.ID, pub.Get("address"), pub.Get("port"), lan.Get("address"), lan.Get("port"), pub.Get("CID"))
+			return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
+		}
+	}
 	newAddr := newStation.Get("address")
 
 	byAddr := map[string]*StationURL{}

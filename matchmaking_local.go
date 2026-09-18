@@ -36,6 +36,19 @@ func (m *Matchmaking) notifyParticipationWithDelay(caller *Connection, participa
 }
 
 func (m *Matchmaking) bridgeSessionStations(urls []*StationURL) ([]*StationURL, bridgeStatus) {
+	if m.PreservePiaStationIdentity {
+		local, public := selectStations(urls)
+		if local == nil || public == nil {
+			return urls, bridgeNoStations
+		}
+		if local.GetInt("CID") == 0 || public.GetInt("CID") != local.GetInt("CID") {
+			return urls, bridgeNoRVCID
+		}
+		if m.PublicStationFirst {
+			return []*StationURL{public, local}, bridgeOK
+		}
+		return []*StationURL{local, public}, bridgeOK
+	}
 	if !m.LocalLoopbackStations || m.PublicStationFirst {
 		return natBridgeStations(urls, m.PublicStationFirst)
 	}

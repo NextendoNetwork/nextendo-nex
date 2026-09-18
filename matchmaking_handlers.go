@@ -143,6 +143,10 @@ type Matchmaking struct {
 	// sur « Getting ready to depart » (2618-0502). MK8/S2 gardent le défaut (false), forme
 	// éprouvée contre leur serveur.
 	PublicStationFirst bool
+	// PreservePiaStationIdentity returns the host's canonical station locations
+	// instead of substituting an IP-wide NAT observation. Requires the matching
+	// SecureConnectionConfig option so ReplaceURL preserves Register's public port.
+	PreservePiaStationIdentity bool
 	// JoinRespExistingCount fait renvoyer, dans la réponse à JoinMatchmakeSessionWithParam, le
 	// nombre de participants AVANT l'ajout du visiteur (comme the previous stack) au lieu d'après. La Pia
 	// d'Animal Crossing dimensionne son maillage P2P sur ce nombre : compté inclus, le visiteur
