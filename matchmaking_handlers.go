@@ -434,6 +434,7 @@ func finalizeCreatedSession(session *MatchmakeSession, gid uint32, ownerPID uint
 	}
 	session.NumParticipants = 1
 	session.SessionKey = randomBytes(32)
+	rememberSessionKey(gid, session.SessionKey)
 	session.StartedTime = NowDateTime()
 	session.SystemPasswordEnabled = false
 	// Optional (NEXTENDO_OPEN_PARTICIPATION=1), OFF by default.
@@ -1580,20 +1581,48 @@ func (m *Matchmaking) GatheringIDByPID(pid uint64) (uint32, bool) {
 	return 0, false
 }
 
+// recentSessionKeys keeps the last few gatherings' mesh keys so a capture can still be
+// decoded after the session it belongs to collapsed — which is exactly when one is worth
+// decoding. Small and bounded; the keys protect nothing once the gathering is gone.
+var (
+	recentKeysMu    sync.Mutex
+	recentKeys      = map[uint32][]byte{}
+	recentKeysOrder []uint32
+)
+
+func rememberSessionKey(gid uint32, key []byte) {
+	recentKeysMu.Lock()
+	defer recentKeysMu.Unlock()
+	if _, seen := recentKeys[gid]; !seen {
+		recentKeysOrder = append(recentKeysOrder, gid)
+		for len(recentKeysOrder) > 16 {
+			delete(recentKeys, recentKeysOrder[0])
+			recentKeysOrder = recentKeysOrder[1:]
+		}
+	}
+	recentKeys[gid] = append([]byte(nil), key...)
+}
+
 // SessionKeyForGID returns the raw session key for a gathering, for a title that needs
 // to decrypt its own P2P mesh traffic for diagnosis (e.g. against a live packet capture).
 // Copies the slice so a caller can't mutate the live key. Must NOT be called while
 // holding m.mu.
 func (m *Matchmaking) SessionKeyForGID(gid uint32) ([]byte, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	g := m.gatherings[gid]
-	if g == nil || g.session == nil || len(g.session.SessionKey) == 0 {
-		return nil, false
+	if g != nil && g.session != nil && len(g.session.SessionKey) > 0 {
+		out := append([]byte(nil), g.session.SessionKey...)
+		m.mu.Unlock()
+		return out, true
 	}
-	out := make([]byte, len(g.session.SessionKey))
-	copy(out, g.session.SessionKey)
-	return out, true
+	m.mu.Unlock()
+
+	recentKeysMu.Lock()
+	defer recentKeysMu.Unlock()
+	if key, ok := recentKeys[gid]; ok {
+		return append([]byte(nil), key...), true
+	}
+	return nil, false
 }
 
 // SessionByPID returns the participant PID list of the gathering the given PID is in,
