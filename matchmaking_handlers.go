@@ -1580,6 +1580,22 @@ func (m *Matchmaking) GatheringIDByPID(pid uint64) (uint32, bool) {
 	return 0, false
 }
 
+// SessionKeyForGID returns the raw session key for a gathering, for a title that needs
+// to decrypt its own P2P mesh traffic for diagnosis (e.g. against a live packet capture).
+// Copies the slice so a caller can't mutate the live key. Must NOT be called while
+// holding m.mu.
+func (m *Matchmaking) SessionKeyForGID(gid uint32) ([]byte, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	g := m.gatherings[gid]
+	if g == nil || g.session == nil || len(g.session.SessionKey) == 0 {
+		return nil, false
+	}
+	out := make([]byte, len(g.session.SessionKey))
+	copy(out, g.session.SessionKey)
+	return out, true
+}
+
 // SessionByPID returns the participant PID list of the gathering the given PID is in,
 // or nil when it is in none. Must NOT be called while holding m.mu.
 func (m *Matchmaking) SessionByPID(pid uint64) []uint64 {
