@@ -56,6 +56,25 @@ func TestNATPortNotRepointedWhenTwoConsolesShareTheIP(t *testing.T) {
 	}
 }
 
+// Consoles in one household must keep their LAN station: probing the shared public
+// address needs NAT hairpinning most home routers refuse, and the punch dies rtt=0.
+func TestProbeKeepsLANStationBetweenConsolesBehindOneNAT(t *testing.T) {
+	ep := NewEndpoint(testSettings())
+	host := NewConnection(ep, "71.192.22.246:52052", func([]byte) {})
+	host.PID, host.ID = 1800003406, 1
+	joiner := NewConnection(ep, "71.192.22.246:52054", func([]byte) {})
+	joiner.PID, joiner.ID = 1800009999, 2
+	remote := NewConnection(ep, "186.54.129.113:55412", func([]byte) {})
+	remote.PID, remote.ID = 1800000414, 3
+
+	if !behindSameNAT(host, joiner) {
+		t.Error("same public address must be recognised as one NAT")
+	}
+	if behindSameNAT(host, remote) {
+		t.Error("different public addresses must not be treated as one NAT")
+	}
+}
+
 // A console that reconnects briefly holds two connections; that is one player, not two,
 // and must not disable repointing for itself.
 func TestNATPortRepointedAcrossOneConsolesReconnect(t *testing.T) {

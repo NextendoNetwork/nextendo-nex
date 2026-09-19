@@ -115,6 +115,9 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 	//
 	// Left off for the titles whose clients already advertise their own public
 	// endpoint (their probes work as-is); enabled per game server.
+	//
+	// The station as the console sent it, kept for targets behind the same NAT.
+	lanStation := stationToProbe
 	if host, _, err := splitHostPortSafe(conn.RemoteAddr); err == nil && !isPrivateIP(host) {
 		if probeRepointEnabled() || overlayStation(conn, ParseStationURL(stationToProbe).Get("address"), host) {
 			u := ParseStationURL(stationToProbe)
@@ -153,6 +156,17 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 		// salon a son propre port — donc la substitution vit ici, dans la boucle.
 		station := stationToProbe
 		corps := probeBody
+		// Two consoles in one household reach us from the same public address. Sending
+		// the repointed station makes them punch that address, which needs NAT hairpinning
+		// most home routers refuse; the station they sent carries the LAN address instead.
+		if station != lanStation && behindSameNAT(conn, target) {
+			station = lanStation
+			out := NewStreamOut(s)
+			out.StationURL(ParseStationURL(station))
+			corps = out.Bytes()
+			fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d -> pid=%d: même NAT, station LAN conservée %s\n",
+				conn.PID, target.PID, station)
+		}
 		if PairRelayActive() {
 			if rHost, rPort, ok := PairRelayFor(conn.PID, target.PID, PublicIPOf(conn), PublicIPOf(target)); ok {
 				// Meme fonction que le cote visiteur : les deux moities doivent
@@ -169,6 +183,12 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			conn.PID, target.PID, target.ID, rvcid, station)
 		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps))
 	}
+}
+
+// behindSameNAT reports whether two connections reach the server from one public address.
+func behindSameNAT(a, b *Connection) bool {
+	ipA, ipB := PublicIPOf(a), PublicIPOf(b)
+	return ipA != "" && ipA == ipB
 }
 
 // natPortUnambiguous reports whether the NAT responder's observation for host can be
