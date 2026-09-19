@@ -121,7 +121,7 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			if u.Get("address") != host {
 				u.Set("address", host)
 			}
-			if p, ok := natPortForIP(host); ok {
+			if p, ok := natPortForIP(host); ok && natPortUnambiguous(conn, host) {
 				u.SetInt("port", p)
 			}
 			repointed := u.String()
@@ -169,6 +169,34 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			conn.PID, target.PID, target.ID, rvcid, station)
 		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps))
 	}
+}
+
+// natPortUnambiguous reports whether the NAT responder's observation for host can be
+// attributed to this console alone.
+//
+// nat_endpoints.txt holds ONE port per IP, so when several consoles sit behind the same
+// public address — one household, or a CGNAT/mobile carrier — the newest probe overwrites
+// the others and every station would be repointed at whichever peer checked in last. The
+// peer then punches at its own port and every probe dies (rtt=0). Counting distinct PIDs
+// rather than connections matters: a console that reconnects briefly holds two.
+// When it is ambiguous we keep the port the console advertised, which is what repointing
+// did before it existed.
+func natPortUnambiguous(conn *Connection, host string) bool {
+	if conn == nil || conn.Endpoint == nil || host == "" {
+		return true
+	}
+	pids := make(map[uint64]struct{}, 2)
+	for _, id := range conn.Endpoint.ConnectionIDs() {
+		c := conn.Endpoint.FindConnectionByID(id)
+		if c == nil || c.PID == 0 || PublicIPOf(c) != host {
+			continue
+		}
+		pids[c.PID] = struct{}{}
+		if len(pids) > 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // overlayStation reports whether addr is a VPN-adapter address the caller registered alongside its observed public one.
