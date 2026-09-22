@@ -14,7 +14,7 @@
 ## What is this?
 
 **nextendo-nex** is the server core that powers the [Nextendo Network](https://nextendo.network)
-game servers — Mario Kart 8 Deluxe, Splatoon 2, Super Smash Bros. Ultimate, and others.
+game servers: Mario Kart 8 Deluxe, Splatoon 2, Super Smash Bros. Ultimate, and others.
 
 NEX is the client-server middleware many Nintendo games use for matchmaking, rankings, and other
 online services, layered on top of the PRUDP transport. This package reimplements the **server side**
@@ -25,7 +25,7 @@ of that stack from scratch:
 - **Kerberos-style** ticket authentication (auth server ↔ secure server)
 - The **common service protocols** games build on (matchmaking, ranking, data store, utility, …)
 
-It has **no third-party NEX dependencies** — only permissive Go libraries (`gorilla/websocket`,
+It has **no third-party NEX dependencies**, only permissive Go libraries (`gorilla/websocket`,
 `lxzan/gws`). The module is `github.com/NextendoNetwork/nextendo-nex`.
 
 ## Usage
@@ -52,6 +52,6 @@ replacement service. It is not affiliated with, endorsed by, or associated with 
 
 ## License
 
-Released under the **[PolyForm Shield License 1.0.0](LICENSE.md)** — a source-available license: you
+Released under the **[PolyForm Shield License 1.0.0](LICENSE.md)**, a source-available license: you
 may read, use, modify, and self-host the code, but not use it to provide a product that competes with
 Nextendo Network.
