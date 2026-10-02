@@ -252,6 +252,13 @@ type Connection struct {
 	recvBuf []byte
 	fragBuf []byte
 
+	// recus : les derniers numeros de sequence fiables RECUS, pour reconnaitre un
+	// paquet renvoye par la console (notre ACK s'est perdu) et ne pas le traiter deux
+	// fois. Voir dejaRecu.
+	recus    [128]uint16
+	recusVus [128]bool
+	recusPos int
+
 	outReliable uint16
 	outPing     uint16
 
@@ -417,6 +424,10 @@ func (c *Connection) processSYN(p *Packet) {
 
 	c.connectionSig = ConnectionSignature(c.RemoteAddr)
 	c.minorVersion = min8(c.Settings.PrudpMinorVersion, p.MinorVersion)
+	// Nouvelle session : les numeros de sequence repartent de un, la fenetre des
+	// paquets deja recus ne vaut plus rien.
+	c.recusVus = [len(c.recus)]bool{}
+	c.recusPos = 0
 	c.supportedFunc = uint32(c.Settings.SupportedFunctions) & p.SupportedFunc
 
 	ack := &Packet{
@@ -570,6 +581,17 @@ func (c *Connection) processData(p *Packet) {
 	}
 	if p.HasFlag(FlagNeedACK) {
 		c.sendAck(p)
+		// UN PAQUET FIABLE RENVOYE EST RECONFIRME, PAS RETRAITE. Quand notre ACK se
+		// perd, la console renvoie le meme paquet ; nous le traitions une seconde fois.
+		// Sur une requete, cela donnait DEUX reponses au meme appel, envoyees en
+		// parallele et dont les fragments s'entrelacaient : la console ne pouvait plus
+		// reassembler ni l'une ni l'autre et attendait sans fin. Mesure en production
+		// (SMM2, 2026-10-01/02) : 12 blocages du mode sans fin sur 12 suivaient un
+		// GetUsers(48) recu en double a moins d'une milliseconde d'intervalle. Au milieu
+		// d'une requete fragmentee, le doublon corrompait aussi le reassemblage.
+		if c.dejaRecu(p.PacketID) {
+			return
+		}
 	}
 	// Reassemble reliable fragments in arrival order (WebSocket is in-order).
 	c.fragBuf = append(c.fragBuf, p.Payload...)
@@ -578,6 +600,21 @@ func (c *Connection) processData(p *Packet) {
 		c.fragBuf = nil
 		c.dispatchRMC(full)
 	}
+}
+
+// dejaRecu dit si ce numero de sequence fiable a deja ete recu, et le retient sinon.
+// Une fenetre des 128 derniers suffit : un renvoi suit l'original de quelques
+// millisecondes, et la console n'a jamais autant de paquets en vol.
+func (c *Connection) dejaRecu(seq uint16) bool {
+	for i, s := range c.recus {
+		if c.recusVus[i] && s == seq {
+			return true
+		}
+	}
+	c.recus[c.recusPos] = seq
+	c.recusVus[c.recusPos] = true
+	c.recusPos = (c.recusPos + 1) % len(c.recus)
+	return false
 }
 
 func (c *Connection) processPing(p *Packet) {
