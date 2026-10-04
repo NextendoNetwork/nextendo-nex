@@ -468,7 +468,38 @@ func (m *Matchmaking) createGathering(conn *Connection, src *MatchmakeSession) *
 	finalizeCreatedSession(&session, gid, conn.PID)
 	g := &gathering{session: &session, participants: []uint64{conn.PID}, hostConnID: conn.ID}
 	m.gatherings[gid] = g
+	m.releaseAbandonedSolo(conn.PID, gid)
 	return g
+}
+
+// releaseAbandonedSolo supprime les salons ou `pid` etait SEUL, quand il vient d'en
+// ouvrir un autre (gardeGID). Mesure sur Mario Strikers : le client cree une session
+// (createSession), puis appelle autoMatchmake qui lui en cree une SECONDE, sans jamais
+// quitter la premiere. L'abandonnee reste « en recherche » pour toujours, et un autre
+// joueur peut y atterrir pour attendre un hote qui est ailleurs.
+//
+// Ne touche QUE les salons reduits a ce seul joueur : un salon ou d'autres sont deja
+// presents est une vraie partie, on n'y arrache personne (et il n'y a donc ni migration
+// d'hote ni notification a emettre ici, sous le verrou).
+//
+// Appele avec m.mu tenu.
+func (m *Matchmaking) releaseAbandonedSolo(pid uint64, gardeGID uint32) {
+	if pid == 0 {
+		return
+	}
+	for gid, g := range m.gatherings {
+		if gid == gardeGID || g == nil || g.session == nil {
+			continue
+		}
+		if len(g.participants) != 1 || g.participants[0] != pid {
+			continue
+		}
+		delete(m.gatherings, gid)
+		if g.code != "" {
+			delete(m.byCode, g.code)
+		}
+		fmt.Printf("[MM] salon %d abandonne par pid=%d (nouveau salon %d) -> supprime\n", gid, pid, gardeGID)
+	}
 }
 
 // notifyJoin pushes the Participate (3001) notification to the gathering owner
