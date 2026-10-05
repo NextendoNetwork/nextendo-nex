@@ -128,6 +128,39 @@ func TestFindByParticipantFindsHostSession(t *testing.T) {
 	}
 }
 
+func TestFindByParticipantResolvesAccountIDButEchoesRequestedID(t *testing.T) {
+	s := acnhSettings()
+	m := NewMatchmaking()
+	m.FindByParticipantEnabled = true
+	const accountID uint64 = 10000000000000001
+	const hostPID uint64 = 1800009001
+	m.FindByParticipantIDResolver = func(id uint64) uint64 {
+		if id == accountID {
+			return hostPID
+		}
+		return id
+	}
+	sess := &MatchmakeSession{GameMode: 1, OpenParticipation: true}
+	sess.ID, sess.OwnerPID = 26, hostPID
+	m.gatherings[26] = &gathering{session: sess, participants: []uint64{hostPID}}
+	request := NewStreamOut(s)
+	request.Add(&FindMatchmakeSessionByParticipantParam{PrincipalIDs: []uint64{accountID}})
+	conn := &Connection{Settings: s, PID: 1800009002}
+	response := m.findByParticipant(conn, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodFindByParticipant, 1, request.Bytes()))
+	if response == nil || response.IsError {
+		t.Fatalf("friend lookup failed: %+v", response)
+	}
+	in := NewStreamIn(response.Body, s)
+	results := ReadList(in, func(i *StreamIn) *FindMatchmakeSessionByParticipantResult {
+		var result FindMatchmakeSessionByParticipantResult
+		i.Extract(&result)
+		return &result
+	})
+	if in.Err() != nil || len(results) != 1 || results[0].PrincipalID != accountID || results[0].Session.ID != 26 {
+		t.Fatalf("friend room not returned under the requested ID: %+v (%v)", results, in.Err())
+	}
+}
+
 // Le défaut doit rester la liste vide : Smash appelle 0x33 au démarrage et s'appuie dessus.
 func TestFindByParticipantDisabledByDefault(t *testing.T) {
 	if NewMatchmaking().FindByParticipantEnabled {

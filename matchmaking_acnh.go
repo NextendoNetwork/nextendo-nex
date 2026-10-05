@@ -180,6 +180,13 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 	var param FindMatchmakeSessionByParticipantParam
 	in := NewStreamIn(req.Body, s)
 	in.Extract(&param)
+	lookupIDs := param.PrincipalIDs
+	if m.FindByParticipantIDResolver != nil && len(lookupIDs) != 0 {
+		lookupIDs = make([]uint64, len(param.PrincipalIDs))
+		for i, id := range param.PrincipalIDs {
+			lookupIDs[i] = m.FindByParticipantIDResolver(id)
+		}
+	}
 
 	var results []*FindMatchmakeSessionByParticipantResult
 	m.mu.Lock()
@@ -222,8 +229,8 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 	}
 
-	for _, pid := range param.PrincipalIDs {
-		g := m.sessionOfParticipant(pid)
+	for i, id := range param.PrincipalIDs {
+		g := m.sessionOfParticipant(lookupIDs[i])
 		if g == nil {
 			continue
 		}
@@ -236,7 +243,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		// (2618-0502). Ici le demandeur est un ami autorisé à visiter : aucune fuite. Le mot de
 		// passe reste retiré (ACNH n'en pose pas : le laissez-passer d'île est le Dodo Code).
 		r.UserPassword = ""
-		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: pid, Session: r})
+		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: id, Session: r})
 	}
 	m.mu.Unlock()
 
@@ -245,7 +252,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 	for _, r := range results {
 		out.Add(r)
 	}
-	fmt.Printf("[MM] findByParticipant(pids=%v) -> %d session(s)\n", param.PrincipalIDs, len(results))
+	fmt.Printf("[MM] findByParticipant(pids=%v resolved=%v) -> %d session(s)\n", param.PrincipalIDs, lookupIDs, len(results))
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 

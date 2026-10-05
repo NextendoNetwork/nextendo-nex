@@ -116,6 +116,11 @@ type Matchmaking struct {
 	// entre amis ; Smash n'appelle cette méthode qu'au démarrage et attend une liste vide,
 	// donc le défaut (false) préserve son comportement actuel.
 	FindByParticipantEnabled bool
+	// FindByParticipantIDResolver translates a title's account identifiers into
+	// the PIDs used by matchmaking. It runs before the matchmaking lock because
+	// a title may need an account-service lookup. The result still names the
+	// identifier the client requested.
+	FindByParticipantIDResolver func(uint64) uint64
 	// FindByParticipantVideVeutDireToutes : une liste de PID VIDE dans
 	// FindMatchmakeSessionByParticipant signifie « n'importe quelle session ouverte »
 	// et non « aucune ».
