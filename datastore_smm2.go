@@ -645,6 +645,43 @@ func handleDataStoreSyncUserProfile(conn *Connection, req *RMCMessage) *RMCMessa
 		return NewRMCError(s, ProtocolDataStoreSMM2, req.CallID, ResultDataStoreNotFound)
 	}
 
+	// LA REQUETE PORTE LE PROFIL A JOUR, ET ON L'IGNORAIT. Mesure chez Nintendo le
+	// 2026-10-05 : apres « changer de tenue », la console envoie la 49 avec le meme
+	// debut que RegisterUserParam — pseudo, UnknownStruct1 (4 x u16), Mii — et les
+	// quatre u16 sont la TENUE PORTEE (le chapeau choisi y apparait : 0, 12, 38, 1).
+	// On ne lisait rien : la tenue s'affichait puis disparaissait au rechargement.
+	if len(req.Body) > 0 {
+		in := NewStreamIn(req.Body, s)
+		body := in
+		if s.StructHeader {
+			_ = in.U8()
+			body = in.Substream()
+		}
+		nom := body.String()
+		unk := body
+		if s.StructHeader {
+			_ = body.U8()
+			unk = body.Substream()
+		}
+		var tenue [4]uint16
+		for i := range tenue {
+			tenue[i] = unk.U16()
+		}
+		mii := body.QBuffer()
+		if body.Err() == nil && unk.Err() == nil {
+			p.Unk = tenue
+			if nom != "" {
+				p.Nom = nom
+			}
+			if len(mii) > 0 {
+				p.Mii = mii
+			}
+			smm2Profils.Store(conn.PID, p)
+			smm2SauverProfils()
+			fmt.Printf("[DataStoreSMM2] SyncUserProfile pid=%d : tenue %v enregistree\n", conn.PID, tenue)
+		}
+	}
+
 	champs := NewStreamOut(s)
 	champs.U64(p.PID)
 	champs.String(p.Nom)
