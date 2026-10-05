@@ -229,7 +229,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 	}
 
-	for i, id := range param.PrincipalIDs {
+	for i := range param.PrincipalIDs {
 		g := m.sessionOfParticipant(lookupIDs[i])
 		if g == nil {
 			continue
@@ -243,7 +243,9 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		// (2618-0502). Ici le demandeur est un ami autorisé à visiter : aucune fuite. Le mot de
 		// passe reste retiré (ACNH n'en pose pas : le laissez-passer d'île est le Dodo Code).
 		r.UserPassword = ""
-		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: id, Session: r})
+		// This is a NEX PrincipalID in the response. SMM2 may ask using an NSA
+		// account ID, but the returned participant must be the session's NEX PID.
+		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: lookupIDs[i], Session: r})
 	}
 	m.mu.Unlock()
 

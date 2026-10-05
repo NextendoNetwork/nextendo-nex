@@ -128,7 +128,7 @@ func TestFindByParticipantFindsHostSession(t *testing.T) {
 	}
 }
 
-func TestFindByParticipantResolvesAccountIDButEchoesRequestedID(t *testing.T) {
+func TestFindByParticipantResolvesAccountIDAndReturnsNEXPID(t *testing.T) {
 	s := acnhSettings()
 	m := NewMatchmaking()
 	m.FindByParticipantEnabled = true
@@ -156,8 +156,8 @@ func TestFindByParticipantResolvesAccountIDButEchoesRequestedID(t *testing.T) {
 		i.Extract(&result)
 		return &result
 	})
-	if in.Err() != nil || len(results) != 1 || results[0].PrincipalID != accountID || results[0].Session.ID != 26 {
-		t.Fatalf("friend room not returned under the requested ID: %+v (%v)", results, in.Err())
+	if in.Err() != nil || len(results) != 1 || results[0].PrincipalID != hostPID || results[0].Session.ID != 26 {
+		t.Fatalf("friend room not returned with the host NEX PID: %+v (%v)", results, in.Err())
 	}
 }
 
