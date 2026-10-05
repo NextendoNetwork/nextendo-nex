@@ -344,8 +344,9 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	// tables de la bibliotheque de kinnay (datastore_smm2.py, UserInfo.save). Deux
 	// erreurs de ce fichier apparaissent en les confrontant, corrigees ici :
 	// « reussites » et « tentatives » etaient inversees dans play_stats, et
-	// multiplayer_stats emploie des cles NON CONTIGUES (0, 2, 3, 10, 11) alors qu'on en
-	// ecrivait quinze a la suite — les cles 4 a 9 et 12 a 14 n'existent pas.
+	// La capture Nintendo du 2026-10-02 a depuis corrige cette ancienne deduction :
+	// multiplayer_stats porte bien les quinze cles 0 a 14, dont la cle 1 = 1 pour un
+	// compte sans parties versus. Le jeu fournit les valeurs via SMM2StatsMultijoueur.
 	st := SMM2StatsDe(p.PID)
 
 	// play_stats : 0 parties, 1 reussites, 2 tentatives, 3 morts.
@@ -379,10 +380,8 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	// fonction dont la justification a expire sans que personne y revienne — apres
 	// SuperWorldId et les records du mode sans fin.
 	//
-	// La cle 0 est la NOTE du joueur, celle qui le classe en versus. Un mode competitif ne
-	// peut pas lancer une partie si le serveur ne sait pas dans quel rang ranger celui qui
-	// la demande, et c'est la piste la plus serieuse pour le versus, qui refuse d'avancer.
-	// Le jeu fournit la table ; a defaut, on n'ecrit rien, comme avant.
+	// La capture Nintendo donne la cle 0 = 0 et la cle 1 = 1 pour un compte sans
+	// historique de versus. Le jeu fournit la table ; a defaut, on n'ecrit rien.
 	WriteMap(champs, SMM2StatsMultijoueur(p.PID), func(o *StreamOut, k uint8) { o.U8(k) }, func(o *StreamOut, v uint32) { o.U32(v) })
 
 	// unk7 : points de createur de la semaine.
