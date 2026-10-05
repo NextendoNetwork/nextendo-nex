@@ -152,6 +152,33 @@ func TestParticipationDelayIsPerMatchmaking(t *testing.T) {
 	}
 }
 
+func TestCreateSessionNotificationFollowsResponse(t *testing.T) {
+	s := testSettings()
+	ep := NewEndpoint(s)
+	sent := make(chan struct{}, 16)
+	c := NewConnection(ep, "127.0.0.1:12345", func([]byte) { sent <- struct{}{} })
+	c.PID = 1001
+	ep.registerConnection(c)
+	mm := NewMatchmaking()
+	mm.CreateSessionNotificationDelay = 60 * time.Millisecond
+	body := NewStreamOut(s)
+	body.Add(&AutoMatchmakeParam{Session: MatchmakeSession{Gathering: Gathering{MaxParticipants: 4}}})
+	response := mm.ExtensionHandler()(c, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodCreateMatchmakeSessionWithParam, 1, body.Bytes()))
+	if response == nil || response.IsError {
+		t.Fatal("create failed")
+	}
+	select {
+	case <-sent:
+		t.Fatal("host notification arrived before create returned")
+	default:
+	}
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("host notification never arrived")
+	}
+}
+
 func TestDelayedParticipationDropsRemovedRoom(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)

@@ -7,12 +7,16 @@ import (
 )
 
 func (m *Matchmaking) notifyParticipationWithDelay(caller *Connection, participants []uint64, gid uint32) {
-	if m.ParticipationNotificationDelay <= 0 {
+	m.notifyParticipationAfter(caller, participants, gid, m.ParticipationNotificationDelay)
+}
+
+func (m *Matchmaking) notifyParticipationAfter(caller *Connection, participants []uint64, gid uint32, delay time.Duration) {
+	if delay <= 0 {
 		m.notifyParticipation(caller, participants, gid, "")
 		return
 	}
 	parts := append([]uint64(nil), participants...)
-	time.AfterFunc(m.ParticipationNotificationDelay, func() {
+	time.AfterFunc(delay, func() {
 		m.mu.Lock()
 		g := m.gatherings[gid]
 		if g == nil || !containsPID(g.participants, caller.PID) || caller.Endpoint.FindConnectionByPID(caller.PID) != caller {

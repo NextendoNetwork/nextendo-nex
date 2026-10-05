@@ -108,6 +108,10 @@ type Matchmaking struct {
 	// ParticipationNotificationDelay lets a title finish creating its local
 	// session before Participate arrives. Zero preserves synchronous delivery.
 	ParticipationNotificationDelay time.Duration
+	// CreateSessionNotificationDelay applies only to CreateMatchmakeSession.
+	// SMM2 receives the host's Participate event after the create response;
+	// sending it first leaves the host absent from its own friend-room list.
+	CreateSessionNotificationDelay time.Duration
 	// LocalLoopbackStations preserves per-client station identity in same-host
 	// tests. Enable it only when loopback NAT probes are also suppressed.
 	LocalLoopbackStations bool
@@ -789,7 +793,11 @@ func (m *Matchmaking) createSession(conn *Connection, req *RMCMessage) *RMCMessa
 	}
 	// Self-notify the host (same as autoMatchmake) so a friend-room/tournament lobby
 	// held solo also leaves Pia's WaitNotification wall instead of 2618-562.
-	m.notifyParticipationWithDelay(conn, parts, gid)
+	delay := m.ParticipationNotificationDelay
+	if m.CreateSessionNotificationDelay > 0 {
+		delay = m.CreateSessionNotificationDelay
+	}
+	m.notifyParticipationAfter(conn, parts, gid, delay)
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 
