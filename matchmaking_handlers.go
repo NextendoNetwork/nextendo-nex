@@ -1030,7 +1030,7 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	// Hand over the host's REAL UDP endpoint, not the WebSocket TCP port it registered:
 	// the latter is unreachable for Pia's hole-punch, so the joiner's probe never lands
 	// and the console stalls at MatchMakingExt m=1.
-	urls, status := m.bridgeSessionStations(host.Stations())
+	urls, status := m.bridgeSessionStationsForPair(conn, host)
 	if status != bridgeNoRVCID {
 		// Either it worked, or nothing a moment brings will change it.
 		return sessionURLsResponse(conn, req, relayedFor(conn, host, urls))
@@ -1067,7 +1067,7 @@ func (m *Matchmaking) answerSessionURLsWhenHostIsReady(conn *Connection, req *RM
 	for time.Now().Before(deadline) {
 		time.Sleep(hostReplaceURLPoll)
 
-		if urls, status := m.bridgeSessionStations(host.Stations()); status == bridgeOK {
+		if urls, status := m.bridgeSessionStationsForPair(conn, host); status == bridgeOK {
 			fmt.Printf("[MM] GetSessionURLs pid=%d: host reported its ReplaceURL -> bridged\n", conn.PID)
 			conn.SendRMC(sessionURLsResponse(conn, req, relayedFor(conn, host, urls)))
 

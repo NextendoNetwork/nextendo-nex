@@ -56,6 +56,43 @@ func TestNATPortNotRepointedWhenTwoConsolesShareTheIP(t *testing.T) {
 	}
 }
 
+func TestGetSessionURLsKeepsHostsPortBehindSharedIP(t *testing.T) {
+	natTable(t, "203.0.113.9 19498\n") // The last observation belongs to the joiner.
+	ep := NewEndpoint(testSettings())
+	host := NewConnection(ep, "203.0.113.9:19503", func([]byte) {})
+	host.PID, host.ID = 1800001206, 3
+	host.SetStations([]*StationURL{
+		ParseStationURL("prudp:/address=192.168.1.60;port=19568;CID=436879845;RVCID=3"),
+		ParseStationURL("prudp:/address=203.0.113.9;port=19503;type=11"),
+	})
+	ep.registerConnection(host)
+	joiner := NewConnection(ep, "203.0.113.9:19483", func([]byte) {})
+	joiner.PID, joiner.ID = 1800007103, 4
+	ep.registerConnection(joiner)
+	mm := NewMatchmaking()
+	mm.gatherings[1] = &gathering{hostConnID: host.ID}
+
+	request := NewStreamOut(joiner.Settings)
+	request.U32(1)
+	response := mm.MatchMakingHandler()(joiner, NewRMCRequest(joiner.Settings, ProtocolMatchMaking, MethodGetSessionURLs, 1, request.Bytes()))
+	if response == nil || response.IsError {
+		t.Fatalf("GetSessionURLs failed: %+v", response)
+	}
+	urls := ReadList(NewStreamIn(response.Body, joiner.Settings), func(in *StreamIn) *StationURL { return in.StationURLValue() })
+	if len(urls) != 2 {
+		t.Fatalf("urls=%v", urls)
+	}
+	if urls[0].Get("address") != "192.168.1.60" || urls[0].GetInt("port") != 19568 {
+		t.Fatalf("joiner was given the wrong host LAN endpoint: %s", urls[0])
+	}
+	if urls[1].GetInt("port") == 19498 || urls[0].GetInt("CID") != 436879845 {
+		t.Fatalf("joiner's observation replaced host identity: %v", urls)
+	}
+	if host.Stations()[0].GetInt("port") != 19568 {
+		t.Fatal("stored host station was mutated")
+	}
+}
+
 // Consoles in one household must keep their LAN station: probing the shared public
 // address needs NAT hairpinning most home routers refuse, and the punch dies rtt=0.
 func TestProbeKeepsLANStationBetweenConsolesBehindOneNAT(t *testing.T) {

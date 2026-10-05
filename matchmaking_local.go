@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"fmt"
 	"net"
 	"time"
 )
@@ -81,5 +82,33 @@ func (m *Matchmaking) bridgeSessionStations(urls []*StationURL) ([]*StationURL, 
 	// Keep the public port: the host still sends it in its PIA location.
 	pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
 	pub.Set("Pa", lan.Get("address"))
+	return []*StationURL{lan, pub}, bridgeOK
+}
+
+// bridgeSessionStationsForPair keeps the host's own UDP port when the two
+// consoles share a public IP. The NNCS observation file has only one port per
+// IP; after the joiner probes, that entry can be the joiner's port. Replacing
+// the host's LAN port with it makes the joiner probe itself.
+func (m *Matchmaking) bridgeSessionStationsForPair(joiner, host *Connection) ([]*StationURL, bridgeStatus) {
+	urls := host.Stations()
+	if !behindSameNAT(joiner, host) || m.PreservePiaStationIdentity {
+		return m.bridgeSessionStations(urls)
+	}
+	local, public := selectStations(urls)
+	if local == nil || public == nil {
+		return urls, bridgeNoStations
+	}
+	port := local.GetInt("port")
+	if local.GetInt("RVCID") == 0 || port <= 1 || port > 65535 {
+		return urls, bridgeNoRVCID
+	}
+	lan := local.Copy()
+	lan.Remove("type")
+	lan.Remove("Pa")
+	pub := public.Copy()
+	pub.SetInt("port", port)
+	pub.SetInt("type", int(StationURLFlagBehindNAT|StationURLFlagPublic|stationURLFlagSwitch))
+	pub.Set("Pa", lan.Get("address"))
+	fmt.Printf("[natbridge] shared public IP: host pid=%d LAN UDP port=%d (NNCS IP cache ignored)\n", host.PID, port)
 	return []*StationURL{lan, pub}, bridgeOK
 }
