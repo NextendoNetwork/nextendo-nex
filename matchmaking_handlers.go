@@ -112,6 +112,9 @@ type Matchmaking struct {
 	// SMM2 receives the host's Participate event after the create response;
 	// sending it first leaves the host absent from its own friend-room list.
 	CreateSessionNotificationDelay time.Duration
+	// NormalizeCreateSessionRV matches SMM2's measured CreateSession response:
+	// the unsigned @RV value sent by the client comes back as a signed integer.
+	NormalizeCreateSessionRV bool
 	// LocalLoopbackStations preserves per-client station identity in same-host
 	// tests. Enable it only when loopback NAT probes are also suppressed.
 	LocalLoopbackStations bool
@@ -780,6 +783,11 @@ func (m *Matchmaking) createSession(conn *Connection, req *RMCMessage) *RMCMessa
 
 	m.mu.Lock()
 	g := m.createGathering(conn, &param.Session)
+	if m.NormalizeCreateSessionRV {
+		if rv, ok := g.session.Param.Params["@RV"]; ok && rv.Type == VariantUint64 && rv.Uint <= 1<<63-1 {
+			g.session.Param.Params["@RV"] = Variant{Type: VariantInt64, Int: int64(rv.Uint)}
+		}
+	}
 	result := *g.session
 	gid := g.session.ID
 	parts := append([]uint64(nil), g.participants...)

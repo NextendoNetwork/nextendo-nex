@@ -140,11 +140,11 @@ func TestFindByParticipantResolvesAccountIDAndReturnsNEXPID(t *testing.T) {
 		}
 		return id
 	}
-	sess := &MatchmakeSession{GameMode: 1, OpenParticipation: true}
+	sess := &MatchmakeSession{GameMode: 1, OpenParticipation: true, ApplicationData: []byte{1, 2, 3}, Param: MatchmakeParam{Params: map[string]Variant{"@SR": {Type: VariantBool, Bool: true}}}}
 	sess.ID, sess.OwnerPID = 26, hostPID
 	m.gatherings[26] = &gathering{session: sess, participants: []uint64{hostPID}}
 	request := NewStreamOut(s)
-	request.Add(&FindMatchmakeSessionByParticipantParam{PrincipalIDs: []uint64{accountID}})
+	request.Add(&FindMatchmakeSessionByParticipantParam{PrincipalIDs: []uint64{accountID}, Options: 1})
 	conn := &Connection{Settings: s, PID: 1800009002}
 	response := m.findByParticipant(conn, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodFindByParticipant, 1, request.Bytes()))
 	if response == nil || response.IsError {
@@ -158,6 +158,9 @@ func TestFindByParticipantResolvesAccountIDAndReturnsNEXPID(t *testing.T) {
 	})
 	if in.Err() != nil || len(results) != 1 || results[0].PrincipalID != hostPID || results[0].Session.ID != 26 {
 		t.Fatalf("friend room not returned with the host NEX PID: %+v (%v)", results, in.Err())
+	}
+	if len(results[0].Session.ApplicationData) != 3 || len(results[0].Session.Param.Params) != 0 {
+		t.Fatalf("friend room result options ignored: app=%d params=%d", len(results[0].Session.ApplicationData), len(results[0].Session.Param.Params))
 	}
 }
 

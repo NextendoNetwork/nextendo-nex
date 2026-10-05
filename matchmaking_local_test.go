@@ -161,11 +161,18 @@ func TestCreateSessionNotificationFollowsResponse(t *testing.T) {
 	ep.registerConnection(c)
 	mm := NewMatchmaking()
 	mm.CreateSessionNotificationDelay = 60 * time.Millisecond
+	mm.NormalizeCreateSessionRV = true
 	body := NewStreamOut(s)
-	body.Add(&AutoMatchmakeParam{Session: MatchmakeSession{Gathering: Gathering{MaxParticipants: 4}}})
+	body.Add(&AutoMatchmakeParam{Session: MatchmakeSession{Gathering: Gathering{MaxParticipants: 4}, Param: MatchmakeParam{Params: map[string]Variant{"@RV": {Type: VariantUint64, Uint: 0}}}}})
 	response := mm.ExtensionHandler()(c, NewRMCRequest(s, ProtocolMatchmakeExtension, MethodCreateMatchmakeSessionWithParam, 1, body.Bytes()))
 	if response == nil || response.IsError {
 		t.Fatal("create failed")
+	}
+	var created MatchmakeSession
+	in := NewStreamIn(response.Body, s)
+	in.Extract(&created)
+	if in.Err() != nil || created.Param.Params["@RV"].Type != VariantInt64 {
+		t.Fatalf("@RV did not match the measured signed response: %+v (%v)", created.Param.Params["@RV"], in.Err())
 	}
 	select {
 	case <-sent:
