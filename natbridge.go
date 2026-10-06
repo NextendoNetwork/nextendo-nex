@@ -183,7 +183,7 @@ func natBridgeStationsWithReportedPort(urls []*StationURL, publicFirst, useRepor
 	udpPort, ok := natPortForIP(publicAddr)
 	portSource := "observed"
 	if !ok {
-		if useReportedPort && local.GetInt("CID") != 0 && local.GetInt("port") > 1 && local.GetInt("port") <= 65535 {
+		if useReportedPort && local.GetInt("RVCID") != 0 && local.GetInt("port") > 1 && local.GetInt("port") <= 65535 {
 			udpPort = local.GetInt("port")
 			portSource = "ReplaceURL"
 		} else {

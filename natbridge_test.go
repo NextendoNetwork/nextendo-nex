@@ -40,13 +40,16 @@ func hostStations() []*StationURL {
 func TestNatBridgeReportedPortFallbackIsOptIn(t *testing.T) {
 	writeNatFile(t, "")
 	urls := hostStations()
-	urls[0].SetInt("CID", 123)
 
 	if out, status := natBridgeStations(urls, false); status != bridgeNoObservation || out[1].GetInt("port") != 54321 {
 		t.Fatalf("default bridge changed without NNCS: status=%v public=%d", status, out[1].GetInt("port"))
 	}
 	if out, status := natBridgeStationsWithReportedPort(urls, false, true); status != bridgeOK || out[1].GetInt("port") != 12345 {
 		t.Fatalf("opt-in bridge did not use ReplaceURL port: status=%v public=%d", status, out[1].GetInt("port"))
+	}
+	urls[0].Remove("RVCID")
+	if _, status := natBridgeStationsWithReportedPort(urls, false, true); status != bridgeNoObservation {
+		t.Fatalf("must not use a port before ReplaceURL: status=%v", status)
 	}
 }
 
