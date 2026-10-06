@@ -167,6 +167,9 @@ type Matchmaking struct {
 	// sur « Getting ready to depart » (2618-0502). MK8/S2 gardent le défaut (false), forme
 	// éprouvée contre leur serveur.
 	PublicStationFirst bool
+	// UseReportedUDPPort allows ReplaceURL's UDP port as a per-title fallback when
+	// the NNCS responder has no observation for the host. Disabled by default.
+	UseReportedUDPPort bool
 	// PreservePiaStationIdentity returns the host's canonical station locations
 	// instead of substituting an IP-wide NAT observation. Requires the matching
 	// SecureConnectionConfig option so ReplaceURL preserves Register's public port.

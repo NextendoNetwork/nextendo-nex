@@ -37,6 +37,19 @@ func hostStations() []*StationURL {
 	return []*StationURL{lan, pub}
 }
 
+func TestNatBridgeReportedPortFallbackIsOptIn(t *testing.T) {
+	writeNatFile(t, "")
+	urls := hostStations()
+	urls[0].SetInt("CID", 123)
+
+	if out, status := natBridgeStations(urls, false); status != bridgeNoObservation || out[1].GetInt("port") != 54321 {
+		t.Fatalf("default bridge changed without NNCS: status=%v public=%d", status, out[1].GetInt("port"))
+	}
+	if out, status := natBridgeStationsWithReportedPort(urls, false, true); status != bridgeOK || out[1].GetInt("port") != 12345 {
+		t.Fatalf("opt-in bridge did not use ReplaceURL port: status=%v public=%d", status, out[1].GetInt("port"))
+	}
+}
+
 func TestNatBridgeSubstitutesObservedUdpPort(t *testing.T) {
 	writeNatFile(t, "203.0.113.9 40822\n198.51.100.1 1234\n")
 

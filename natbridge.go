@@ -154,6 +154,13 @@ func natPortForIP(ip string) (int, bool) {
 // private address, no RVCID. A wrong port is a broken match; the raw URLs are at least
 // what the previous behaviour handed out.
 func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bridgeStatus) {
+	return natBridgeStationsWithReportedPort(urls, publicFirst, false)
+}
+
+// natBridgeStationsWithReportedPort can use the UDP port from ReplaceURL when
+// the NNCS observation is unavailable. Enable it per title only: a symmetric
+// NAT may map that port differently for another destination.
+func natBridgeStationsWithReportedPort(urls []*StationURL, publicFirst, useReportedPort bool) ([]*StationURL, bridgeStatus) {
 	local, public := selectStations(urls)
 	if local == nil || public == nil {
 		// Both candidates are required. A host reporting only one usually means its
@@ -174,13 +181,18 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	}
 
 	udpPort, ok := natPortForIP(publicAddr)
+	portSource := "observed"
 	if !ok {
-		// The nncs responder never saw this host. Either it has not probed yet, or its
-		// probe went to the OTHER responder — the one on the other machine, whose file
-		// this server cannot read.
-		natBridgeSkip("no nncs observation for "+publicAddr, urls)
-
-		return urls, bridgeNoObservation
+		if useReportedPort && local.GetInt("CID") != 0 && local.GetInt("port") > 1 && local.GetInt("port") <= 65535 {
+			udpPort = local.GetInt("port")
+			portSource = "ReplaceURL"
+		} else {
+			// The nncs responder never saw this host. Either it has not probed yet, or its
+			// probe went to the OTHER responder — the one on the other machine, whose file
+			// this server cannot read.
+			natBridgeSkip("no nncs observation for "+publicAddr, urls)
+			return urls, bridgeNoObservation
+		}
 	}
 
 	// The RVCID comes from the host's ReplaceURL, sent AFTER its NAT handshake. This is the
@@ -223,8 +235,8 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// between a joinable host and a session that stalls at MatchMakingExt m=1, and it
 	// depends on a file written by another process — so it must be visible in the log
 	// rather than inferred from players reporting that it works.
-	fmt.Printf("[natbridge] %s: registered tcp port %d -> observed udp port %d (lan=%s rvcid=%d, publicFirst=%v)\n",
-		publicAddr, public.GetInt("port"), udpPort, privateAddr, cid, publicFirst)
+	fmt.Printf("[natbridge] %s: registered tcp port %d -> %s udp port %d (lan=%s rvcid=%d, publicFirst=%v)\n",
+		publicAddr, public.GetInt("port"), portSource, udpPort, privateAddr, cid, publicFirst)
 
 	// Station order. MK8/S2 take [lan, public] (the default). ACNH's Pia treats the FIRST
 	// station as the primary P2P candidate and never falls through to the second, so a

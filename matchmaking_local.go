@@ -55,7 +55,7 @@ func (m *Matchmaking) bridgeSessionStations(urls []*StationURL) ([]*StationURL, 
 		return []*StationURL{local, public}, bridgeOK
 	}
 	if !m.LocalLoopbackStations || m.PublicStationFirst {
-		return natBridgeStations(urls, m.PublicStationFirst)
+		return natBridgeStationsWithReportedPort(urls, m.PublicStationFirst, m.UseReportedUDPPort)
 	}
 	var local, public *StationURL
 	for _, u := range urls {
@@ -70,7 +70,7 @@ func (m *Matchmaking) bridgeSessionStations(urls []*StationURL) ([]*StationURL, 
 		}
 	}
 	if local == nil || public == nil {
-		return natBridgeStations(urls, m.PublicStationFirst)
+		return natBridgeStationsWithReportedPort(urls, m.PublicStationFirst, m.UseReportedUDPPort)
 	}
 	// ReplaceURL supplies the per-client UDP port; an IP-only NNCS cache cannot
 	// distinguish two emulator instances sharing 127.0.0.1.
