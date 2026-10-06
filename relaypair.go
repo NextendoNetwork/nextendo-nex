@@ -68,16 +68,17 @@ type PairTotaux struct {
 
 // PairStat decrit une paire vivante.
 type PairStat struct {
-	Port       int
-	PIDs       [2]uint64
-	Attendus   [2]string
-	Places     [2]string // endpoints appris ; "" si la place est encore libre
-	Recus      uint64
-	Relayes    uint64
-	Rejets     uint64
-	Remaps     uint64
-	Rejetees   map[string]uint64
-	InactifSec int
+	Port        int
+	PIDs        [2]uint64
+	Attendus    [2]string
+	Places      [2]string // endpoints appris ; "" si la place est encore libre
+	Recus       uint64
+	Relayes     uint64
+	RelayesVers [2]uint64
+	Rejets      uint64
+	Remaps      uint64
+	Rejetees    map[string]uint64
+	InactifSec  int
 }
 
 // RelayStats est l etat complet du relais, pour le tableau de bord.
@@ -113,14 +114,15 @@ func PairRelayStats() RelayStats {
 	for port, ps := range pairSocks {
 		ps.mu.Lock()
 		p := PairStat{
-			Port:       port,
-			PIDs:       [2]uint64{ps.pidLo, ps.pidHi},
-			Attendus:   ps.attendus,
-			Recus:      ps.recus,
-			Relayes:    ps.relayes,
-			Rejets:     ps.rejets,
-			Remaps:     ps.remaps,
-			InactifSec: int(maintenant.Sub(ps.dernier).Seconds()),
+			Port:        port,
+			PIDs:        [2]uint64{ps.pidLo, ps.pidHi},
+			Attendus:    ps.attendus,
+			Recus:       ps.recus,
+			Relayes:     ps.relayes,
+			RelayesVers: ps.relayesVers,
+			Rejets:      ps.rejets,
+			Remaps:      ps.remaps,
+			InactifSec:  int(maintenant.Sub(ps.dernier).Seconds()),
 			// Copie : ne jamais rendre la carte vivante, le boucle ecrit dedans.
 			Rejetees: make(map[string]uint64, len(ps.rejetVu)),
 		}
@@ -212,11 +214,12 @@ type pairSocket struct {
 	// capture du 2026-08-31 a montre 254 paquets entrants pour 104 relayes sans qu aucune
 	// ligne de journal ne l indique : les compteurs cote serveur regardaient l appairage,
 	// jamais le trafic.
-	recus   uint64
-	relayes uint64
-	rejets  uint64
-	remaps  uint64
-	rejetVu map[string]uint64 // source refusee -> nombre de paquets
+	recus       uint64
+	relayes     uint64
+	relayesVers [2]uint64 // paquets envoyes a chacune des deux extremites
+	rejets      uint64
+	remaps      uint64
+	rejetVu     map[string]uint64 // source refusee -> nombre de paquets
 }
 
 // PairRelayFor arme le port de la paire et rend l adresse a annoncer aux deux consoles.
@@ -374,6 +377,12 @@ func (ps *pairSocket) boucle() {
 		}
 		ps.mu.Lock()
 		ps.relayes++
+		for i, vu := range ps.vus {
+			if vu != nil && vu.Port == dst.Port && vu.IP.Equal(dst.IP) {
+				ps.relayesVers[i]++
+				break
+			}
+		}
 		ps.mu.Unlock()
 		if _, err := ps.conn.WriteToUDP(buf[:n], dst); err != nil {
 			fmt.Printf("[relais-paire] :%d renvoi %s -> %s echoue: %v\n", ps.port, src, dst, err)
@@ -486,6 +495,7 @@ func (ps *pairSocket) inactifDepuis(d time.Duration) bool {
 func bilanEtCumul(ps *pairSocket, port int, motif string) {
 	ps.mu.Lock()
 	recus, relayes, rejets, remaps := ps.recus, ps.relayes, ps.rejets, ps.remaps
+	relayesVers := ps.relayesVers
 	detail := ""
 	for src, n := range ps.rejetVu {
 		detail += fmt.Sprintf(" %s×%d", src, n)
@@ -507,8 +517,8 @@ func bilanEtCumul(ps *pairSocket, port int, motif string) {
 		pairTotal.PairesMuettes++
 	}
 
-	fmt.Printf("[relais-paire] :%d ferme (%s) — recus=%d relayes=%d rejets=%d remaps=%d (attendus %s / %s ; vus %q / %q)%s\n",
-		port, motif, recus, relayes, rejets, remaps,
+	fmt.Printf("[relais-paire] :%d ferme (%s) — recus=%d relayes=%d vers=[%d,%d] rejets=%d remaps=%d (attendus %s / %s ; vus %q / %q)%s\n",
+		port, motif, recus, relayes, relayesVers[0], relayesVers[1], rejets, remaps,
 		attendus[0], attendus[1], places[0], places[1], detail)
 }
 
