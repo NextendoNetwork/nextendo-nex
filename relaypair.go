@@ -3,6 +3,7 @@ package nex
 import (
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -372,6 +373,7 @@ func (ps *pairSocket) boucle() {
 		ps.mu.Unlock()
 
 		dst := ps.apparier(src)
+		volcarPaquete(ps, src, dst, buf[:n])
 		if dst == nil {
 			continue
 		}
@@ -388,6 +390,56 @@ func (ps *pairSocket) boucle() {
 			fmt.Printf("[relais-paire] :%d renvoi %s -> %s echoue: %v\n", ps.port, src, dst, err)
 		}
 	}
+}
+
+// RelayDumpPath : si non vide, chaque datagramme qui traverse un relais par paire est ecrit
+// dans ce fichier (heure, port, cote A/B, longueur, octets en hex). Sert a MESURER l echange
+// P2P Pia quand le serveur ne voit rien — JSAB, 2026-10-06 : le visiteur quitte la session
+// juste apres un hole-punch reussi. Les IP ne sont PAS ecrites. Plafond relayDumpMax paquets.
+// Desactive par defaut ; a n allumer que pour une prueba.
+var RelayDumpPath string
+
+const relayDumpMax = 20000
+
+var (
+	relayDumpMu sync.Mutex
+	relayDumpF  *os.File
+	relayDumpN  int
+)
+
+func coteDe(ps *pairSocket, a *net.UDPAddr) string {
+	if a == nil {
+		return "-"
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	for i, vu := range ps.vus {
+		if vu != nil && vu.Port == a.Port && vu.IP.Equal(a.IP) {
+			return string(rune('A' + i))
+		}
+	}
+	return "?"
+}
+
+func volcarPaquete(ps *pairSocket, src, dst *net.UDPAddr, b []byte) {
+	if RelayDumpPath == "" {
+		return
+	}
+	de, vers := coteDe(ps, src), coteDe(ps, dst)
+	relayDumpMu.Lock()
+	defer relayDumpMu.Unlock()
+	if relayDumpN >= relayDumpMax {
+		return
+	}
+	if relayDumpF == nil {
+		f, err := os.OpenFile(RelayDumpPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		relayDumpF = f
+	}
+	relayDumpN++
+	fmt.Fprintf(relayDumpF, "%s :%d %s->%s %d %x\n", time.Now().UTC().Format("15:04:05.000000"), ps.port, de, vers, len(b), b)
 }
 
 // memeReseau dit si deux adresses IPv4 partagent leur /24.

@@ -80,14 +80,29 @@ func natAck(conn *Connection, req *RMCMessage) *RMCMessage {
 // handshake never completes -> the match connects but never renders (the black screen). Response
 // layout: [relayMode i32][currentUTCTime DateTime][relay address String][port u16][addressType i32]
 // [gameServerID u32].
+// RelaySigChaineVideZero / RelaySigGameServerID : options par titre pour la Pia RECENTE
+// (5.37, Just Shapes & Beats), desactivees par defaut — les autres titres gardent les octets
+// d'avant. Le 2026-10-06, JSAB : le visiteur reussit le hole-punch puis quitte la session
+// (0x32.1) a chaque essai. Deux suspects dans cette reponse : la chaine vide ecrite longueur 1
+// (AGENTS.md : mesure deux fois comme cassante, SMB35 et Eagle) et gameServerID a zero.
+// Hypothese, a mesurer sur console.
+var (
+	RelaySigChaineVideZero bool
+	RelaySigGameServerID   uint32
+)
+
 func relaySignatureKey(conn *Connection, req *RMCMessage) *RMCMessage {
 	out := NewStreamOut(conn.Settings)
 	out.U32(0)                          // relayMode (int32)
 	out.DateTime(NowDateTime().Value()) // currentUTCTime (UTC)
-	out.String("")                      // relay server address — empty = no relay offered
-	out.U16(0)                          // relay server port
-	out.U32(0)                          // relayAddressType (int32)
-	out.U32(0)                          // gameServerID
+	if RelaySigChaineVideZero {
+		out.StringVideZero("") // relay server address — vide, longueur 0
+	} else {
+		out.String("") // relay server address — empty = no relay offered
+	}
+	out.U16(0)                    // relay server port
+	out.U32(0)                    // relayAddressType (int32)
+	out.U32(RelaySigGameServerID) // gameServerID
 	fmt.Printf("[NAT] pid=%d GetRelaySignatureKey -> no relay advertised (proceed on direct mesh)\n", conn.PID)
 	return NewRMCSuccess(conn.Settings, ProtocolNATTraversal, req.Method, req.CallID, out.Bytes())
 }
