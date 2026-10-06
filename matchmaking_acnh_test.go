@@ -134,6 +134,7 @@ func TestFindByParticipantResolvesAccountIDAndReturnsNEXPID(t *testing.T) {
 	m.FindByParticipantEnabled = true
 	const accountID uint64 = 10000000000000001
 	const hostPID uint64 = 1800009001
+	m.FindByParticipantHonorOptions = true // comportement propre a SMM2
 	m.FindByParticipantIDResolver = func(id uint64) uint64 {
 		if id == accountID {
 			return hostPID

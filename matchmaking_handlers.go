@@ -128,6 +128,11 @@ type Matchmaking struct {
 	// a title may need an account-service lookup. The result names the NEX PID
 	// of the participant found in the session.
 	FindByParticipantIDResolver func(uint64) uint64
+	// FindByParticipantHonorOptions trims each found session to what the
+	// request's result options ask for (bit 0 application data, bit 1
+	// matchmake parameters), as SMM2 measured. Off by default: other titles
+	// (ACNH friend visits) keep receiving the full session, as before.
+	FindByParticipantHonorOptions bool
 	// FindByParticipantVideVeutDireToutes : une liste de PID VIDE dans
 	// FindMatchmakeSessionByParticipant signifie « n'importe quelle session ouverte »
 	// et non « aucune ».

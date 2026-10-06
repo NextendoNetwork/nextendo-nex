@@ -128,6 +128,15 @@ type FindMatchmakeSessionByParticipantResult struct {
 	Session     MatchmakeSession
 }
 
+// sessionTrouvee returns the session as found, trimmed to the requested result
+// options only for titles that opted in (FindByParticipantHonorOptions).
+func (m *Matchmaking) sessionTrouvee(src *MatchmakeSession, options uint32) MatchmakeSession {
+	if !m.FindByParticipantHonorOptions {
+		return *src
+	}
+	return findSessionForOptions(src, options)
+}
+
 // Result options request the application buffer (bit 0) and matchmake
 // parameters (bit 1) independently. SMM2 requests bit 0 for friend rooms.
 func findSessionForOptions(src *MatchmakeSession, options uint32) MatchmakeSession {
@@ -223,7 +232,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 			if deja {
 				continue
 			}
-			r := findSessionForOptions(g.session, param.Options)
+			r := m.sessionTrouvee(g.session, param.Options)
 			r.UserPassword = ""
 			// Le PID annonce est celui de l'HOTE : c'est lui que le demandeur va
 			// rejoindre, et le client s'en sert pour identifier la partie.
@@ -247,7 +256,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		if g == nil {
 			continue
 		}
-		r := findSessionForOptions(g.session, param.Options)
+		r := m.sessionTrouvee(g.session, param.Options)
 		// La clé de session DOIT sortir dès la découverte. Le serveur the previous stack de référence la
 		// renvoie dans FindByParticipant (prouvé : mesure sur le serveur de reference, Find/51 = 481o
 		// dont la clé de 32o ; scrubbée on tombe à 449o) et la Pia d'ACNH s'en sert pour amorcer
