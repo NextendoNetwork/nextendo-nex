@@ -43,8 +43,10 @@ func (s *StreamOut) Bool(v bool) {
 	}
 }
 
-// PID writes a principal ID, 4 or 8 bytes per the settings.
+// PID writes a principal ID, 4 or 8 bytes per the settings, translated to the identity
+// the console knows (Settings.PIDPublic).
 func (s *StreamOut) PID(v uint64) {
+	v = s.Settings.Publique(v)
 	if s.Settings.PIDSize == 8 {
 		s.U64(v)
 	} else {
@@ -212,12 +214,13 @@ func (s *StreamIn) Float() float32  { return math.Float32frombits(s.U32()) }
 func (s *StreamIn) Double() float64 { return math.Float64frombits(s.U64()) }
 func (s *StreamIn) Bool() bool      { return s.U8() != 0 }
 
-// PID reads a principal ID, 4 or 8 bytes per the settings.
+// PID reads a principal ID, 4 or 8 bytes per the settings, translated back to the
+// internal PID (Settings.PIDInterne).
 func (s *StreamIn) PID() uint64 {
 	if s.Settings.PIDSize == 8 {
-		return s.U64()
+		return s.Settings.Interne(s.U64())
 	}
-	return uint64(s.U32())
+	return s.Settings.Interne(uint64(s.U32()))
 }
 
 // String reads a NEX String and strips the trailing null terminator.

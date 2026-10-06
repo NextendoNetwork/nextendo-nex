@@ -429,12 +429,26 @@ func (cfg *AuthConfig) buildResponse(req *RMCMessage, retval uint32, pid uint64,
 // par cet identifiant plutot que par notre PID interne.
 var loginNameToPID sync.Map // string -> uint64
 
+// pidToLoginName est l'inverse : le dernier identifiant de connexion vu pour un PID. C'est
+// ce qui permet de rendre a la console, des la reponse d'Auth, l'identite qu'elle connait.
+var pidToLoginName sync.Map // uint64 -> string
+
 // RememberLoginName enregistre la correspondance nom de connexion -> PID.
 func RememberLoginName(name string, pid uint64) {
 	if name == "" || pid == 0 {
 		return
 	}
 	loginNameToPID.Store(name, pid)
+	pidToLoginName.Store(pid, name)
+}
+
+// LoginNameForPID rend le dernier identifiant de connexion vu pour ce PID.
+func LoginNameForPID(pid uint64) (string, bool) {
+	v, ok := pidToLoginName.Load(pid)
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
 }
 
 // PIDForLoginName rend le PID associe a un identifiant de connexion.

@@ -3,6 +3,7 @@ package nex
 import (
 	"fmt"
 	"net"
+	"strconv"
 )
 
 // SecureConnection protocol (the client registers its station URLs here).
@@ -136,8 +137,10 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 		}
 	}
 
-	local.SetInt("PID", int(conn.PID))
-	public.SetInt("PID", int(conn.PID))
+	// Sans signe : un identifiant public de 64 bits deborde un int (Nintendo ecrit
+	// PID=11631508184711325979).
+	local.Set("PID", strconv.FormatUint(conn.Settings.Publique(conn.PID), 10))
+	public.Set("PID", strconv.FormatUint(conn.Settings.Publique(conn.PID), 10))
 	local.SetInt("RVCID", int(conn.ID))
 	public.SetInt("RVCID", int(conn.ID))
 
@@ -196,7 +199,7 @@ func handleReplaceURLWithConfig(conn *Connection, req *RMCMessage, cfg SecureCon
 	if newStation == nil {
 		return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
 	}
-	newStation.SetInt("PID", int(conn.PID))
+	newStation.Set("PID", strconv.FormatUint(conn.Settings.Publique(conn.PID), 10))
 	if cfg.PreservePiaStationIdentity {
 		local, public := selectStations(conn.Stations())
 		if local != nil && public != nil && newStation.GetInt("CID") != 0 &&

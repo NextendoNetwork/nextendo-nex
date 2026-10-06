@@ -298,7 +298,7 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	}
 
 	champs.QBuffer(p.Mii) // le Mii, tel quel
-	champs.String(p.Pays)
+	champs.String(SMM2Pays(p.PID, p.Pays)) // le pays choisi sur le site, sinon celui declare
 	champs.U8(0) // region
 	// last_active : la date d'epoque EMPAQUETEE, jamais zero. Zero n'est pas une date
 	// dans un champ de bits — c'est l'an 0, mois 0, jour 0.
@@ -572,6 +572,25 @@ const smm2MaxPublications uint32 = 32
 // NSA -> compte vit dans le service de comptes, que seul le jeu sait joindre.
 var SMM2PIDJoueurFn func(id uint64) uint64
 
+// SMM2PaysFn : fourni par le jeu, rend le pays a AFFICHER pour un joueur (drapeau).
+//
+// La console declare son pays a l'enregistrement, et elle le tire de la fiche de compte
+// Nintendo que sert nx-account — ou il vaut « FR » pour tout le monde. Le joueur choisit
+// son vrai pays sur le site ; le jeu va le chercher et le rend ici. Vide = rien de mieux
+// que ce que la console a declare.
+var SMM2PaysFn func(pid uint64, declare string) string
+
+// SMM2Pays rend le pays a afficher, ou celui que la console a declare.
+func SMM2Pays(pid uint64, declare string) string {
+	if SMM2PaysFn == nil {
+		return declare
+	}
+	if c := SMM2PaysFn(pid, declare); c != "" {
+		return c
+	}
+	return declare
+}
+
 // SMM2PIDJoueur traduit s'il y a de quoi, et rend l'identifiant inchange sinon. Un
 // traducteur absent doit laisser passer, pas tout casser.
 func SMM2PIDJoueur(id uint64) uint64 {
@@ -682,7 +701,7 @@ func handleDataStoreSyncUserProfile(conn *Connection, req *RMCMessage) *RMCMessa
 	}
 
 	champs := NewStreamOut(s)
-	champs.U64(p.PID)
+	champs.U64(s.Publique(p.PID)) // U64 brut : l'identite publique ne passe pas par PID()
 	champs.String(p.Nom)
 	unk1 := NewStreamOut(s)
 	for _, v := range p.Unk {
@@ -696,7 +715,7 @@ func handleDataStoreSyncUserProfile(conn *Connection, req *RMCMessage) *RMCMessa
 	}
 	champs.QBuffer(p.Mii)
 	champs.U8(p.Langue)
-	champs.String(p.Pays)
+	champs.String(SMM2Pays(p.PID, p.Pays)) // le pays choisi sur le site, sinon celui declare
 	champs.U8(0)
 	champs.Bool(false)
 	champs.Bool(false)

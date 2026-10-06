@@ -45,7 +45,11 @@ func (n *NotificationEvent) Levels() []Level {
 			o.PID(n.PIDSource)
 			o.U32(n.Type)
 			o.U64(n.Param1)
-			o.U64(n.Param2)
+			if n.param2EstUnPID() {
+				o.U64(o.Settings.Publique(n.Param2))
+			} else {
+				o.U64(n.Param2)
+			}
 			// La chaine VIDE : longueur 1 + terminateur (String) ou longueur 0
 			// (StringVideZero) ? MK8 et les autres acceptent la premiere forme, mais ils ne
 			// dependent d'aucun envoi du serveur — PAC-MAN 99 est le premier titre ou nous
@@ -64,10 +68,24 @@ func (n *NotificationEvent) Levels() []Level {
 			n.Type = i.U32()
 			n.Param1 = i.U64()
 			n.Param2 = i.U64()
+			if n.param2EstUnPID() {
+				n.Param2 = i.Settings.Interne(n.Param2)
+			}
 			n.StrParam = i.String()
 			n.Param3 = i.U64()
 		},
 	}}
+}
+
+// param2EstUnPID : ces evenements portent un joueur dans Param2 (qui participe, qui part,
+// qui devient proprietaire ou hote). Il doit sortir sous la meme identite que PIDSource.
+func (n *NotificationEvent) param2EstUnPID() bool {
+	switch n.Type {
+	case NotificationParticipate, NotificationParticipantDisconnected,
+		NotificationEndParticipation, NotificationOwnershipChanged, NotificationHostChanged:
+		return true
+	}
+	return false
 }
 
 // notifStrVideZero : voir le commentaire dans Levels().

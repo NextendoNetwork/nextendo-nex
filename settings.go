@@ -61,6 +61,37 @@ type Settings struct {
 	KerberosKeySize       int
 	KerberosKeyDerivation int
 	KerberosTicketVersion int
+
+	// Identite publique des joueurs. nil pour tous les titres sauf ceux qui l'activent.
+	//
+	// Sur Nintendo, le PID que l'Auth donne a la console est le MEME nombre que
+	// l'identifiant de compte (NSA) qu'elle embarque dans ses propres donnees — Super Mario
+	// Maker 2 met cet identifiant dans l'ApplicationData d'une salle d'amis et le compare au
+	// proprietaire. Nous donnions notre PID interne 1800xxxxxx : l'hote d'une salle d'amis
+	// apparaissait INVISIBLE sur les deux consoles (mesure le 2026-10-05).
+	//
+	// PIDPublic traduit un PID interne vers ce que la console doit voir ; PIDInterne fait
+	// l'inverse pour ce qu'elle envoie. Les deux doivent etre idempotents et rendre la
+	// valeur inchangee quand ils ne savent pas. A l'interieur du serveur rien ne change :
+	// les connexions, les sessions et les magasins restent sur le PID interne.
+	PIDPublic  func(uint64) uint64
+	PIDInterne func(uint64) uint64
+}
+
+// Publique rend le PID tel que la console doit le voir (inchange sans PIDPublic).
+func (s *Settings) Publique(pid uint64) uint64 {
+	if s == nil || s.PIDPublic == nil {
+		return pid
+	}
+	return s.PIDPublic(pid)
+}
+
+// Interne rend le PID interne d'un identifiant venu de la console (inchange sans PIDInterne).
+func (s *Settings) Interne(pid uint64) uint64 {
+	if s == nil || s.PIDInterne == nil {
+		return pid
+	}
+	return s.PIDInterne(pid)
 }
 
 // NewSwitchSettings returns the Switch (NEX 4) wire profile for the given access
