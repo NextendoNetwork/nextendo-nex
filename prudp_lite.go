@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"strconv"
 )
 
@@ -206,6 +207,12 @@ func ConnectionSignature(addr string) []byte {
 // CONNECT carrying NEED_ACK is signed — it proves the sender knows the access
 // key — computed as HMAC-MD5(md5(accessKey), md5(accessKey) || connectionSig).
 // Every other Lite packet is unsigned (nil).
+// decouverteCleAcces (NEX_DECOUVERTE_CLE=1) : un titre dont on ignore la cle d'acces se fait
+// refuser au CONNECT. Avec ce drapeau, le refus journalise aussi connSig et la signature recue,
+// qui suffisent a retrouver la cle par force brute (8 hex = 2^32). Decouverte seulement : en
+// production il reste coupe, et la connexion est refusee dans tous les cas.
+var decouverteCleAcces = os.Getenv("NEX_DECOUVERTE_CLE") == "1"
+
 func LitePacketSignature(accessKey string, p *Packet, connectionSig []byte) []byte {
 	if p.Type == PacketCONNECT && p.HasFlag(FlagNeedACK) {
 		key := md5Sum([]byte(accessKey))

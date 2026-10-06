@@ -454,6 +454,11 @@ func (c *Connection) processCONNECT(p *Packet) {
 	expected := LitePacketSignature(c.Settings.AccessKey, p, c.connectionSig)
 	if !equalBytes(expected, p.Signature) {
 		fmt.Printf("[PRUDP] CONNECT bad signature from %s got=%x want=%x\n", c.RemoteAddr, p.Signature, expected)
+		if decouverteCleAcces {
+			// Tout ce qu'il faut pour retrouver la cle d'acces hors ligne : la signature vaut
+			// HMAC-MD5(MD5(cle), MD5(cle) || connSig) et connSig est choisi par NOUS.
+			fmt.Printf("[DECOUVERTE] connSig=%x signature=%x\n", c.connectionSig, p.Signature)
+		}
 		return // invalid — ignore
 	}
 
