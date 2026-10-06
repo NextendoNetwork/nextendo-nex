@@ -133,6 +133,10 @@ type Matchmaking struct {
 	// matchmake parameters), as SMM2 measured. Off by default: other titles
 	// (ACNH friend visits) keep receiving the full session, as before.
 	FindByParticipantHonorOptions bool
+	// FindByParticipantEchoRequestedID presents each found session under the
+	// identifier the finder used (owner, host and participant), when it differs from
+	// the resolved NEX PID. SMM2 friend rooms need it; off by default.
+	FindByParticipantEchoRequestedID bool
 	// FindByParticipantVideVeutDireToutes : une liste de PID VIDE dans
 	// FindMatchmakeSessionByParticipant signifie « n'importe quelle session ouverte »
 	// et non « aucune ».

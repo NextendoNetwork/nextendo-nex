@@ -267,7 +267,25 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		r.UserPassword = ""
 		// This is a NEX PrincipalID in the response. SMM2 may ask using an NSA
 		// account ID, but the returned participant must be the session's NEX PID.
-		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: lookupIDs[i], Session: r})
+		principal := lookupIDs[i]
+		// FindByParticipantEchoRequestedID : presenter la session SOUS L'IDENTIFIANT que
+		// le demandeur a employe. Mesure en production (SMM2, 2026-10-05) : la console
+		// cherche son ami par l'identifiant de sa liste d'amis (souvent le NSA) ; nous
+		// rendions la session sous le PID interne et elle ne la reconnaissait pas comme
+		// celle de son ami — aucune JoinSession. Seule CETTE reponse change : l'hote, sa
+		// session et ses notifications gardent le PID de son authentification (le changer
+		// cote hote avait casse la creation : « communication error »).
+		if m.FindByParticipantEchoRequestedID && param.PrincipalIDs[i] != lookupIDs[i] {
+			demande := param.PrincipalIDs[i]
+			principal = demande
+			if r.OwnerPID == lookupIDs[i] {
+				r.OwnerPID = demande
+			}
+			if r.HostPID == lookupIDs[i] {
+				r.HostPID = demande
+			}
+		}
+		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: principal, Session: r})
 	}
 	m.mu.Unlock()
 
