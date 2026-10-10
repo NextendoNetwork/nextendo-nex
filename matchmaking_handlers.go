@@ -71,6 +71,8 @@ const (
 	MethodUpdateMatchmakeSessionPart     uint32 = 0x2C
 	MethodUpdateProgressScore            uint32 = 0x22
 	MethodFindMatchmakeSessionBySingleID uint32 = 0x31
+	// FindMatchmakeSessionByGatheringIdDetail(gid): Monopoly's host re-reads its own session during a match.
+	MethodFindMatchmakeSessionByGatheringIDDetail uint32 = 0x29
 	MethodCustomPlayingSession           uint32 = 0x3C
 	MethodCustomFriendsQuery             uint32 = 0x41
 	MethodCustomPrivateRoomCreate        uint32 = 0x44
@@ -242,6 +244,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.joinSession(conn, req)
 		case MethodFindMatchmakeSessionBySingleID:
 			return m.findBySingleID(conn, req)
+		case MethodFindMatchmakeSessionByGatheringIDDetail:
+			return m.findByGatheringIDDetail(conn, req)
 		case MethodCustomPrivateRoomCreate:
 			return m.privateRoomCreate(conn, req)
 		case MethodCustomResolveCode:
@@ -868,6 +872,28 @@ func (m *Matchmaking) joinSession(conn *Connection, req *RMCMessage) *RMCMessage
 	if joined {
 		m.notifyParticipationWithDelay(conn, parts, gid)
 	}
+	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
+}
+
+// findByGatheringIDDetail returns the full session (key included), unlike findBySingleID.
+func (m *Matchmaking) findByGatheringIDDetail(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	gid := NewStreamIn(req.Body, s).U32()
+
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	var result *MatchmakeSession
+	if g != nil {
+		r := *g.session
+		result = &r
+	}
+	m.mu.Unlock()
+
+	if result == nil {
+		return NewRMCError(s, ProtocolMatchmakeExtension, req.CallID, ResultRendezVousSessionVoid)
+	}
+	out := NewStreamOut(s)
+	out.Add(result)
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, out.Bytes())
 }
 

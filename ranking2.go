@@ -20,6 +20,7 @@ const (
 	MethodRanking2PutCommonData      uint32 = 3
 	MethodRanking2DelCommonData      uint32 = 4
 	MethodRanking2GetRanking         uint32 = 5
+	MethodRanking2GetRankingByPIDs   uint32 = 6
 	MethodRanking2GetCategorySetting uint32 = 7
 	MethodRanking2GetEstimateMyRank  uint32 = 11
 )
@@ -233,6 +234,47 @@ func (r *Ranking2Store) Handler() RMCHandler {
 			out.Add(&info)
 			fmt.Printf("[Ranking2] classement categorie=%d rendu a pid=%d : %d/%d entrees\n",
 				p.Category, conn.PID, len(info.Data), len(tous))
+
+			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
+
+		case MethodRanking2GetRankingByPIDs:
+			// GetRankingByPrincipalId : Ranking2GetByListParam puis List<PID> ; rend le rang global de chaque PID classe.
+			var p Ranking2GetByListParam
+			in := NewStreamIn(req.Body, conn.Settings)
+			in.Extract(&p)
+			n := in.U32()
+			if n > 1024 {
+				n = 0
+			}
+			voulus := make(map[uint64]bool, n)
+			for k := uint32(0); k < n; k++ {
+				voulus[in.PID()] = true
+			}
+			if in.Err() != nil {
+				fmt.Printf("[Ranking2] GetRankingByPrincipalId illisible pid=%d : %v\n", conn.PID, in.Err())
+				voulus = map[uint64]bool{}
+			}
+
+			tous := r.classement(p.Category)
+			info := Ranking2Info{LowestRank: ranking2LowestRank, NumRankedIn: uint32(len(tous))}
+			for idx, e := range tous {
+				if !voulus[e.PID] {
+					continue
+				}
+				info.Data = append(info.Data, Ranking2RankData{
+					Misc:        e.Misc,
+					NexUniqueID: e.NexUniqueID,
+					PrincipalID: e.PID,
+					Rank:        uint32(idx + 1),
+					Score:       e.Score,
+					CommonData:  r.donneesCommunes(e.PID, conn.Settings),
+				})
+			}
+
+			out := NewStreamOut(conn.Settings)
+			out.Add(&info)
+			fmt.Printf("[Ranking2] classement par PID categorie=%d rendu a pid=%d : %d/%d demandes classes\n",
+				p.Category, conn.PID, len(info.Data), len(voulus))
 
 			return NewRMCSuccess(conn.Settings, ProtocolRanking2, req.Method, req.CallID, out.Bytes())
 

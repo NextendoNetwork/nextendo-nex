@@ -182,6 +182,38 @@ func (p *Ranking2GetParam) Levels() []Level {
 	}}
 }
 
+// Ranking2GetByListParam : ce que demande GetRankingByPrincipalId (21 octets, mesure sur Monopoly).
+type Ranking2GetByListParam struct {
+	Category           uint32
+	Offset             uint32
+	Length             uint32
+	SortFlags          uint32
+	OptionFlags        uint32
+	NumSeasonsToGoBack uint8
+}
+
+// Levels implements Structure.
+func (p *Ranking2GetByListParam) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.U32(p.Category)
+			o.U32(p.Offset)
+			o.U32(p.Length)
+			o.U32(p.SortFlags)
+			o.U32(p.OptionFlags)
+			o.U8(p.NumSeasonsToGoBack)
+		},
+		Load: func(i *StreamIn) {
+			p.Category = i.U32()
+			p.Offset = i.U32()
+			p.Length = i.U32()
+			p.SortFlags = i.U32()
+			p.OptionFlags = i.U32()
+			p.NumSeasonsToGoBack = i.U8()
+		},
+	}}
+}
+
 // Ranking2EstimateScoreRankOutput : la reponse du rang estime.
 //
 // On en rendait DEUX champs sur six. Le client lisait donc treize octets qui ne lui
