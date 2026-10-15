@@ -107,6 +107,12 @@ type gathering struct {
 // proven server's session lifecycle (create/join, participant tracking) and the
 // server→client Participate notification the console's Pia waits on.
 type Matchmaking struct {
+	// UseSearchCriteria makes AutoMatchmake honour the search criteria the game sends.
+	// Off by default so titles tuned to the looser matching keep their behaviour.
+	UseSearchCriteria bool
+	// SessionStations, when set, builds the host stations GetSessionURLs hands a joiner, for
+	// titles whose P2P is plain NEX rather than Pia. Nil keeps the shared bridge.
+	SessionStations func(joiner, host *Connection) []*StationURL
 	// ParticipationNotificationDelay lets a title finish creating its local
 	// session before Participate arrives. Zero preserves synchronous delivery.
 	ParticipationNotificationDelay time.Duration
@@ -710,6 +716,10 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 	var g *gathering
 	var repli *gathering // salon dont l'hote est momentanement absent : accepte en dernier recours
 	skippedNAT := 0
+	skippedCriteria := 0
+	if m.UseSearchCriteria {
+		fmt.Printf("[MM] autoMatchmake pid=%d criteria=%+v\n", conn.PID, param.Criteria)
+	}
 	// [Nextendo] A solo-isolated PID (NEX_SOLO_PIDS) never joins an existing lobby: it always
 	// opens its own gathering. Gives a private test account a reliable solo online lobby on a
 	// SHARED server, sidestepping the P2P/NAT hole-punch that fails (2618-0521) when it gets
@@ -721,6 +731,10 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 				cand.session.OpenParticipation &&
 				motDePasseCompatible(cand.session, src) &&
 				uint16(len(cand.participants)) < cand.session.MaxParticipants {
+				if m.UseSearchCriteria && !criteriaAccept(param.Criteria, cand.session, len(cand.participants)) {
+					skippedCriteria++
+					continue
+				}
 				// Skip a lobby the joiner can't hole-punch with (would give everyone 2618-0510);
 				// keep looking for a compatible one.
 				if !gatheringNATCompatible(ep, joinerClass, cand.participants, conn.PID) {
@@ -763,6 +777,9 @@ func (m *Matchmaking) autoMatchmake(conn *Connection, req *RMCMessage) *RMCMessa
 			// en boucle. On force minP=1 pour ce PID isolé : count=1 suffit → la course démarre solo.
 			g.session.MinParticipants = 1
 			fmt.Printf("[MM] solo-isolate: pid=%d -> own gid=%d minP=1 (skip join, test account)\n", conn.PID, g.session.ID)
+		} else if skippedCriteria > 0 && skippedNAT == 0 {
+			fmt.Printf("[MM] criteria: pid=%d matched none of %d open lobby(ies) -> opened own gid=%d\n",
+				conn.PID, skippedCriteria, g.session.ID)
 		} else if skippedNAT > 0 {
 			fmt.Printf("[MM] NAT-aware: pid=%d class=%s incompatible with %d open lobby(ies) -> opened own gid=%d\n",
 				conn.PID, joinerClass, skippedNAT, g.session.ID)
@@ -1085,6 +1102,9 @@ func (m *Matchmaking) getSessionURLs(conn *Connection, req *RMCMessage) *RMCMess
 	if host == nil {
 		return sessionURLsResponse(conn, req, nil)
 	}
+	if m.SessionStations != nil {
+		return sessionURLsResponse(conn, req, m.SessionStations(conn, host))
+	}
 
 	// Hand over the host's REAL UDP endpoint, not the WebSocket TCP port it registered:
 	// the latter is unreachable for Pia's hole-punch, so the joiner's probe never lands
@@ -1162,6 +1182,11 @@ func sessionURLsResponse(conn *Connection, req *RMCMessage, urls []*StationURL) 
 	s := conn.Settings
 	out := NewStreamOut(s)
 	WriteList(out, urls, func(o *StreamOut, u *StationURL) { o.StationURL(u) })
+	strs := make([]string, 0, len(urls))
+	for _, u := range urls {
+		strs = append(strs, u.String())
+	}
+	fmt.Printf("[MM] GetSessionURLs pid=%d -> %v\n", conn.PID, strs)
 
 	return NewRMCSuccess(s, ProtocolMatchMaking, req.Method, req.CallID, out.Bytes())
 }

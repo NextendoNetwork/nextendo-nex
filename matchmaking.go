@@ -160,12 +160,35 @@ func (m *MatchmakeSession) Levels() []Level {
 // struct header bounds this object's body.
 type AutoMatchmakeParam struct {
 	Session MatchmakeSession
+	// Criteria is the game's search filter list (any one must match). Read only when the
+	// param arrives in its own structure substream, so a short body never fails the call.
+	Criteria []MatchmakeSessionSearchCriteria
 }
 
 // Levels implements Structure.
 func (a *AutoMatchmakeParam) Levels() []Level {
 	return []Level{{
 		Save: func(o *StreamOut) { o.Add(&a.Session) },
-		Load: func(i *StreamIn) { i.Extract(&a.Session) },
+		Load: func(i *StreamIn) {
+			i.Extract(&a.Session)
+			if !i.Settings.StructHeader || i.EOF() {
+				return
+			}
+			// NEX 4 order: additionalParticipants, gidForParticipationCheck, option,
+			// joinMessage, participationCount, lstSearchCriteria, targetGids.
+			_ = ReadList(i, func(i *StreamIn) uint64 { return i.PID() })
+			_ = i.U32()
+			_ = i.U32()
+			_ = i.String()
+			_ = i.U16()
+			criteria := ReadList(i, func(i *StreamIn) MatchmakeSessionSearchCriteria {
+				var c MatchmakeSessionSearchCriteria
+				i.Extract(&c)
+				return c
+			})
+			if i.Err() == nil {
+				a.Criteria = criteria
+			}
+		},
 	}}
 }
