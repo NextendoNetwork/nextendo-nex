@@ -1,6 +1,7 @@
 package nex
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -27,31 +28,37 @@ import (
 // Disposition relevée sur la capture Nintendo du 2026-08-12 (bloc de 132 octets),
 // telle que documentée en tête de ranking.go :
 //
-//	[0:4]    52 46 00 00   signature
-//	[4:20]   identifiant Mii
-//	[20:42]  nom Mii, UTF-16LE, 22 octets
-//	[42:...] pseudo en jeu, UTF-16LE
+//	[0:4]     variable — PAS une signature (voir plus bas)
+//	[4:20]    identifiant Mii
+//	[20:42]   nom Mii, UTF-16LE
+//	[96:132]  pseudo en jeu, un octet par caractère, terminé par 0
 //
 // Tout ce qui sort d'ici vient du CLIENT. C'est une donnée hostile, pas une
 // identité : bornée, nettoyée, et jamais suffisante à elle seule pour sanctionner.
 
+// Disposition ETABLIE sur 4 371 profils réels relevés en production, et non sur
+// une seule capture : tous font exactement 132 octets, le nom Mii est lisible en
+// UTF-16LE à l'offset 20 sur 4 369 d'entre eux, et le pseudo en jeu est lisible à
+// l'offset 96, un octet par caractère, sur 4 348 (19 pseudos vides).
+//
+// Les quatre premiers octets ne sont PAS une signature stable : on y relève au
+// moins 00000000 (1 411), 52460000 (1 069), 584d0000 (283) et 52420000 (216).
+// Une première version de ce fichier exigeait 52460000 — elle rejetait donc les
+// trois quarts des profils. C'est la taille, et la lisibilité des deux champs,
+// qui disent si le bloc est exploitable.
 const (
-	// commonDataMiiNameOff / Len : le nom Mii, à position fixe dans le bloc.
+	// commonDataBlobLen : taille du bloc. Invariante sur tous les profils relevés.
+	commonDataBlobLen = 132
+	// Nom Mii : UTF-16LE, à position fixe.
 	commonDataMiiNameOff = 20
 	commonDataMiiNameLen = 22
-	// commonDataNickOff : le pseudo en jeu suit immédiatement le nom Mii. Sa
-	// longueur n'est pas documentée par la capture, on lit donc jusqu'au
-	// terminateur plutôt que de figer une taille qu'on ne connaît pas.
-	commonDataNickOff = commonDataMiiNameOff + commonDataMiiNameLen
+	// Pseudo en jeu : un octet par caractère, terminé par 0, jusqu'à la fin du bloc.
+	commonDataNickOff = 96
 	// commonDataMaxNameRunes borne ce qui ressort. Le client peut déposer ce
 	// qu'il veut ; un nom démesuré dans un journal ou une interface de
 	// modération serait un moyen de nuire, pas un nom.
 	commonDataMaxNameRunes = 32
 )
-
-// commonDataMagic : les quatre premiers octets du bloc. Un profil qui ne les
-// porte pas n'a pas été produit par un jeu intact — c'est en soi un signal.
-var commonDataMagic = []byte{0x52, 0x46, 0x00, 0x00}
 
 // CommonDataNames rend le nom Mii et le pseudo en jeu déposés dans ce profil.
 //
@@ -59,17 +66,21 @@ var commonDataMagic = []byte{0x52, 0x46, 0x00, 0x00}
 // court, ou signature absente. Ce n'est pas une erreur à ignorer — un profil
 // non conforme déposé par une connexion authentifiée mérite d'être remonté.
 func CommonDataNames(blob []byte) (miiName, nickname string, ok bool) {
-	if len(blob) < commonDataNickOff+2 {
+	if len(blob) != commonDataBlobLen {
 		return "", "", false
 	}
-	for i, b := range commonDataMagic {
-		if blob[i] != b {
-			return "", "", false
-		}
-	}
 	miiName = decodeUTF16LE(blob[commonDataMiiNameOff : commonDataMiiNameOff+commonDataMiiNameLen])
-	nickname = decodeUTF16LE(blob[commonDataNickOff:])
+	nickname = decodeBytesZ(blob[commonDataNickOff:])
 	return miiName, nickname, true
+}
+
+// decodeBytesZ lit une chaîne d'octets terminée par 0, puis la nettoie. Le pseudo
+// en jeu n'est pas en UTF-16 : il tient sur un octet par caractère.
+func decodeBytesZ(b []byte) string {
+	if i := bytes.IndexByte(b, 0); i >= 0 {
+		b = b[:i]
+	}
+	return sanitizeName(string(b))
 }
 
 // decodeUTF16LE lit une chaîne UTF-16LE jusqu'au terminateur, puis la nettoie.
