@@ -84,6 +84,7 @@ const (
 	// 0x3A est partagé avec la sonde SSBU ci-dessus, d'où le tri par forme.
 	MethodTournamentSearch uint32 = 0x39
 	MethodTournamentJoin   uint32 = 0x3F
+	MethodTournamentLeave  uint32 = 0x40 // retrait des favoris (id -> reponse vide)
 
 	// MatchMakingExt (0x32)
 	MethodEndParticipation uint32 = 0x1
@@ -222,6 +223,8 @@ func (m *Matchmaking) ExtensionHandler() RMCHandler {
 			return m.removeTournament(conn, req)
 		case MethodTournamentJoin:
 			return m.registerTournament(conn, req)
+		case MethodTournamentLeave:
+			return m.unregisterTournament(conn, req)
 		case MethodUpdateProgressScore:
 			// The console updates its progress score during the session-keep loop.
 			// The proven server just acks (no body); refusing it stalls the loop.

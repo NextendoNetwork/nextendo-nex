@@ -461,6 +461,39 @@ func (m *Matchmaking) registerTournament(conn *Connection, req *RMCMessage) *RMC
 	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, nil)
 }
 
+// leaveTournament retire un joueur des inscrits (ses favoris), sans erreur s il n y etait pas.
+func leaveTournament(id uint32, pid uint64) bool {
+	tournamentInit()
+	tournaments.mu.Lock()
+	defer tournaments.mu.Unlock()
+	t := tournaments.byID[id]
+	if t == nil {
+		return false
+	}
+	for i, p := range t.Participants {
+		if p == pid {
+			t.Participants = append(t.Participants[:i], t.Participants[i+1:]...)
+			tournamentDirty.Store(true)
+			return true
+		}
+	}
+	return false
+}
+
+// unregisterTournament (MatchmakeExtension 0x40, unregister_favorite_competition) : le joueur
+// retire le tournoi de ses favoris. Meme forme que l inscription (0x3F) : u32 id, reponse vide.
+// Refusee jusqu au 16/10 (« UNHANDLED method=64 »).
+func (m *Matchmaking) unregisterTournament(conn *Connection, req *RMCMessage) *RMCMessage {
+	s := conn.Settings
+	if len(req.Body) >= 4 {
+		id := uint32(req.Body[0]) | uint32(req.Body[1])<<8 | uint32(req.Body[2])<<16 | uint32(req.Body[3])<<24
+		if leaveTournament(id, conn.PID) {
+			fmt.Printf("[Tournoi] pid=%d retire du tournoi %d\n", conn.PID, id)
+		}
+	}
+	return NewRMCSuccess(s, ProtocolMatchmakeExtension, req.Method, req.CallID, nil)
+}
+
 // TournamentSummaries rend la liste courte servie par Ranking : par tournoi,
 // 7 entiers de 32 bits — identifiant, nombre d'inscrits, puis des compteurs que
 // Nintendo laisse souvent à zéro.
