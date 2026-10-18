@@ -12,9 +12,9 @@ func TestDataStoreGetUsersUnResultatParPID(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800001206
+	conn.PID = 1807000009
 
-	demandes := []uint64{1800000001, 1800000002, 1800000003}
+	demandes := []uint64{1807000001, 1807000002, 1807000003}
 	inner := NewStreamOut(s)
 	WriteList(inner, demandes, func(o *StreamOut, p uint64) { o.PID(p) })
 	inner.U32(0) // option
@@ -96,7 +96,7 @@ func TestDataStoreRegisterUserLitDansLOrdre(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800001206
+	conn.PID = 1807000009
 
 	mii := []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02}
 
@@ -111,7 +111,7 @@ func TestDataStoreRegisterUserLitDansLOrdre(t *testing.T) {
 	unk.U16(4)
 
 	inner := NewStreamOut(s)
-	inner.String("Juanbrew")
+	inner.String("Testbrew")
 	inner.U8(0) // version de UnknownStruct1
 	inner.Buffer(unk.Bytes())
 	inner.QBuffer(mii)
@@ -136,7 +136,7 @@ func TestDataStoreRegisterUserLitDansLOrdre(t *testing.T) {
 	if !ok {
 		t.Fatal("le profil n'a pas ete enregistre")
 	}
-	if p.Nom != "Juanbrew" {
+	if p.Nom != "Testbrew" {
 		t.Errorf("nom = %q", p.Nom)
 	}
 	if p.Pays != "ES" {
@@ -162,7 +162,7 @@ func TestDataStoreRegisterUserRefuseUneRequeteTronquee(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800009999
+	conn.PID = 1807000013
 
 	inner := NewStreamOut(s)
 	inner.String("CorteAqui") // et rien d'autre : la structure est tronquee
@@ -187,17 +187,17 @@ func TestDataStoreGetUsersRendLesProfilsConnus(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800001206
+	conn.PID = 1807000009
 
-	connu := uint64(1800004242)
+	connu := uint64(1807000011)
 	smm2Profils.Store(connu, SMM2Profil{
-		PID: connu, Nom: "Juanjo", Pays: "FR", Langue: 2,
+		PID: connu, Nom: "Joueuse", Pays: "FR", Langue: 2,
 		Mii: []byte{1, 2, 3, 4}, Unk: [4]uint16{9, 8, 7, 6},
 	})
 	defer smm2Profils.Delete(connu)
 
 	// Un inconnu AVANT et APRES le connu : si l'ordre se perd, ce test le voit.
-	demandes := []uint64{1800000001, connu, 1800000002}
+	demandes := []uint64{1807000001, connu, 1807000002}
 	inner := NewStreamOut(s)
 	WriteList(inner, demandes, func(o *StreamOut, p uint64) { o.PID(p) })
 	inner.U32(0)
@@ -227,7 +227,7 @@ func TestDataStoreGetUsersRendLesProfilsConnus(t *testing.T) {
 	if code == "" {
 		t.Fatal("code Maker vide")
 	}
-	if nom := in.String(); nom != "Juanjo" {
+	if nom := in.String(); nom != "Joueuse" {
 		t.Fatalf("nom = %q", nom)
 	}
 
@@ -253,11 +253,11 @@ func TestDataStoreGetUsersRendLesProfilsConnus(t *testing.T) {
 // STABLE pour un joueur donne. Le voir changer d'une session a l'autre serait pire que
 // de ne pas en avoir.
 func TestCodeMakerStable(t *testing.T) {
-	a := codeMakerDe(1800001206)
-	if a != codeMakerDe(1800001206) {
+	a := codeMakerDe(1807000009)
+	if a != codeMakerDe(1807000009) {
 		t.Fatal("le code Maker change pour le meme joueur")
 	}
-	if a == codeMakerDe(1800001207) {
+	if a == codeMakerDe(1807000010) {
 		t.Fatal("deux joueurs partagent le meme code Maker")
 	}
 	if len(a) != 9 {
@@ -272,7 +272,7 @@ func TestDataStoreGetUsersListeVideRendLeProfilDuJoueur(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800007777
+	conn.PID = 1807000012
 
 	smm2Profils.Store(conn.PID, SMM2Profil{PID: conn.PID, Nom: "MoiMeme", Pays: "ES"})
 	defer smm2Profils.Delete(conn.PID)
@@ -299,11 +299,11 @@ func TestDataStoreGetUsersListeVideRendLeProfilDuJoueur(t *testing.T) {
 // notre PID. Les deux existent et ne coincident pas — c'est ce qui faisait echouer
 // toutes les recherches alors que le profil etait bien enregistre.
 func TestDataStoreProfilTrouveParNSA(t *testing.T) {
-	const nsa = uint64(11389664994428258486)
-	const pid = uint64(1800001206)
+	const nsa = uint64(12345678901234567890)
+	const pid = uint64(1807000009)
 
-	RememberLoginName("11389664994428258486", pid)
-	smm2Profils.Store(pid, SMM2Profil{PID: pid, Nom: "Juanjo", Pays: "FR"})
+	RememberLoginName("12345678901234567890", pid)
+	smm2Profils.Store(pid, SMM2Profil{PID: pid, Nom: "Joueuse", Pays: "FR"})
 	defer smm2Profils.Delete(pid)
 
 	if _, ok := profilPourIdentifiant(nsa, pid); !ok {
@@ -324,7 +324,7 @@ func TestDataStoreSearchCoursesPostedByRendUnCatalogueVide(t *testing.T) {
 	s := testSettings()
 	ep := NewEndpoint(s)
 	conn := NewConnection(ep, "88.1.2.3:12345", func([]byte) {})
-	conn.PID = 1800001206
+	conn.PID = 1807000009
 
 	req := NewRMCRequest(s, ProtocolDataStoreSMM2, MethodDataStoreSearchCoursesPostedBy, 74, nil)
 	resp := DataStoreSMM2Handler()(conn, req)
@@ -350,9 +350,9 @@ func TestSMM2ProfilsSurviventAuRedemarrage(t *testing.T) {
 	smm2ProfilsFichier = dir + "/profils.json"
 	defer func() { smm2ProfilsFichier = ancien }()
 
-	const pid = uint64(1800001206)
+	const pid = uint64(1807000009)
 	smm2Profils.Store(pid, SMM2Profil{
-		PID: pid, Nom: "Juanjo", Pays: "FR", Langue: 2,
+		PID: pid, Nom: "Joueuse", Pays: "FR", Langue: 2,
 		Mii: []byte{1, 2, 3}, Unk: [4]uint16{5, 6, 7, 8},
 	})
 	smm2SauverProfils()
@@ -368,7 +368,7 @@ func TestSMM2ProfilsSurviventAuRedemarrage(t *testing.T) {
 	if !ok {
 		t.Fatal("profil perdu apres redemarrage")
 	}
-	if p.Nom != "Juanjo" || p.Pays != "FR" || p.Langue != 2 {
+	if p.Nom != "Joueuse" || p.Pays != "FR" || p.Langue != 2 {
 		t.Fatalf("profil altere : %+v", p)
 	}
 	if string(p.Mii) != string([]byte{1, 2, 3}) {
@@ -390,7 +390,7 @@ func TestSMM2ProfilsCorrompusNeVidentPas(t *testing.T) {
 	if err := os.WriteFile(smm2ProfilsFichier, []byte("{ceci n'est pas du JSON"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const pid = uint64(1800009999)
+	const pid = uint64(1807000013)
 	smm2Profils.Store(pid, SMM2Profil{PID: pid, Nom: "EnMemoire"})
 	defer smm2Profils.Delete(pid)
 

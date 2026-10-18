@@ -28,7 +28,7 @@ func consoleUDP(t *testing.T, ip string) (*net.UDPConn, string) {
 }
 
 func TestBoutEnBoutRelaisPaire(t *testing.T) {
-	const pidHote, pidVisiteur = uint64(1800000009), uint64(1800000042)
+	const pidHote, pidVisiteur = uint64(1807000004), uint64(1807000005)
 
 	SetPairRelay("127.0.0.1", 40500, 30)
 	defer SetPairRelay("", 0, 0)
@@ -37,10 +37,10 @@ func TestBoutEnBoutRelaisPaire(t *testing.T) {
 
 	s := testSettings()
 	ep := NewEndpoint(s)
-	hote := NewConnection(ep, "70.40.81.34:1000", func([]byte) {})
+	hote := NewConnection(ep, "192.0.2.34:1000", func([]byte) {})
 	hote.PID = pidHote
 	ep.registerConnection(hote)
-	visiteur := NewConnection(ep, "201.97.27.16:2000", func([]byte) {})
+	visiteur := NewConnection(ep, "203.0.113.16:2000", func([]byte) {})
 	visiteur.PID = pidVisiteur
 	ep.registerConnection(visiteur)
 
@@ -178,11 +178,11 @@ func TestBoutEnBoutNonVolontaireIntouche(t *testing.T) {
 
 	s := testSettings()
 	ep := NewEndpoint(s)
-	hote := NewConnection(ep, "70.40.81.34:1000", func([]byte) {})
-	hote.PID = 1800000077
+	hote := NewConnection(ep, "192.0.2.34:1000", func([]byte) {})
+	hote.PID = 1807000006
 	ep.registerConnection(hote)
-	visiteur := NewConnection(ep, "201.97.27.16:2000", func([]byte) {})
-	visiteur.PID = 1800000078
+	visiteur := NewConnection(ep, "203.0.113.16:2000", func([]byte) {})
+	visiteur.PID = 1807000007
 	ep.registerConnection(visiteur)
 
 	// Les deux echouent en direct : ils EN ONT BESOIN, mais ne sont pas autorises.

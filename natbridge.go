@@ -186,6 +186,11 @@ func natBridgeStations(urls []*StationURL, publicFirst bool) ([]*StationURL, bri
 	// The RVCID comes from the host's ReplaceURL, sent AFTER its NAT handshake. This is the
 	// one shortfall worth waiting on: the host is expected to report it within about a
 	// second, and a joiner routinely asks before it does.
+	//
+	// Cette garde ne voit que les URL : elle ne joue jamais quand le Register a deja pose le
+	// RVCID (cas de ce coeur). L'URL d'un hote qui n'a pas encore fait son ReplaceURL depuis
+	// sa derniere participation passe donc ici comme valide ; c'est getSessionURLs qui la
+	// retient, d'apres l'etat « pret » de la connexion (natpret.go).
 	cid := local.GetInt("RVCID")
 	if cid == 0 {
 		return urls, bridgeNoRVCID

@@ -10,16 +10,11 @@ import (
 	"strings"
 )
 
-// PROXY-protocol support. When the auth server sits behind a TLS-passthrough proxy
-// (a reverse-proxy on the shared :443 of the main VPS, routing by SNI to the SSBU server),
-// the TCP peer the auth sees is the PROXY, not the console. That breaks the IP-based
-// PID inheritance (RememberAuthPID at auth / RecallAuthPID at the direct secure
-// connection): the auth would remember a reverse-proxy's IP, but the secure connection
-// arrives on the console's REAL IP, so the lookup misses and the session gets a
-// placeholder PID (the console's own hosted session is then owned by a phantom PID →
-// crash). Enabling PROXY protocol on the a reverse-proxy service makes it prepend the real
-// client address, which we parse here so the auth sees the same IP as the secure
-// connection. MK8 (direct :443 on a direct host, no proxy) doesn't need this.
+// PROXY-protocol support. When the auth server sits behind a TLS-passthrough reverse
+// proxy (routing by SNI), the TCP peer the auth sees is the proxy, not the console.
+// Enabling PROXY protocol on the proxy makes it prepend the real client address, which we
+// parse here so the server sees the console's real address (logs, per-address limits).
+// A server reached directly doesn't need this.
 
 // proxyConn overrides RemoteAddr with the real client address from the PROXY header.
 type proxyConn struct {
@@ -64,7 +59,7 @@ func (l *proxyListener) Accept() (net.Conn, error) {
 	return pc, nil
 }
 
-// ListenSecureProxy is ListenSecure but behind a PROXY-protocol v1 front (a reverse-proxy):
+// ListenSecureProxy is ListenSecure but behind a PROXY-protocol v1 front (a reverse proxy):
 // it reads the real client IP from the PROXY header, then terminates TLS itself.
 func (s *Server) ListenSecureProxy(port int, certFile, keyFile string) error {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -77,8 +72,10 @@ func (s *Server) ListenSecureProxy(port int, certFile, keyFile string) error {
 	}
 	tlsLn := tls.NewListener(&proxyListener{ln}, &tls.Config{Certificates: []tls.Certificate{cert}})
 	srv := &http.Server{
-		Handler:      s.mux(),
-		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+		Handler:           s.mux(),
+		TLSNextProto:      make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+		ReadHeaderTimeout: delaiEnTetesHTTP,
+		IdleTimeout:       delaiInactifHTTP,
 	}
 	return srv.Serve(tlsLn)
 }

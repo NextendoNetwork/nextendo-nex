@@ -6,7 +6,7 @@ import (
 )
 
 func TestDeriveKeyNewDeterministic(t *testing.T) {
-	pw := []byte("securepasswordplz1")
+	pw := []byte("mot-de-passe-de-test")
 	a := testSettings().DeriveKey(pw, 2)
 	b := testSettings().DeriveKey(pw, 2)
 	if !bytes.Equal(a, b) {
@@ -61,7 +61,7 @@ func TestClientTicketRoundTrip(t *testing.T) {
 
 func TestServerTicketRoundTrip(t *testing.T) {
 	s := testSettings()
-	secureKey := s.DeriveKey([]byte("securepasswordplz1"), 2)
+	secureKey := s.DeriveKey([]byte("mot-de-passe-de-test"), 2)
 	session := bytes.Repeat([]byte{0xCD}, s.KerberosKeySize)
 
 	ticket := &ServerTicket{Timestamp: MakeDateTime(2026, 7, 13, 12, 0, 0), Source: 1800000000, SessionKey: session}

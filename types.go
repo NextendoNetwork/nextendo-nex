@@ -53,6 +53,9 @@ func ReadStructure(in *StreamIn, st Structure) {
 			if lvl.Load != nil {
 				lvl.Load(sub)
 			}
+			if in.strict && sub.err != nil && in.err == nil {
+				in.err = sub.err
+			}
 		} else if lvl.Load != nil {
 			lvl.Load(in)
 		}

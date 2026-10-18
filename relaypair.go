@@ -150,6 +150,8 @@ func SetPairRelay(host string, portBase, portSpan int) {
 
 	if host == "" {
 		closeAllPairSockets()
+	} else {
+		loadRegionalNode()
 	}
 }
 
@@ -217,6 +219,10 @@ type pairSocket struct {
 	rejets  uint64
 	remaps  uint64
 	rejetVu map[string]uint64 // source refusee -> nombre de paquets
+
+	// adopte : une source hors des adresses attendues a deja ete adoptee pour une place
+	// jamais vue (apparier). Une seule fois par port.
+	adopte bool
 }
 
 // PairRelayFor arme le port de la paire et rend l adresse a annoncer aux deux consoles.
@@ -249,6 +255,11 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	if !BesoinDeRelais(pidA) && !BesoinDeRelais(pidB) &&
 		!RelayForce(pidA) && !RelayForce(pidB) {
 		return "", 0, false
+	}
+	// Both players in the regional node's area: open the pair there (relaypair_regional.go).
+	if h, p, ok := regionalPairRelay(pidA, pidB, ipA, ipB); ok {
+		NoterPaireRelayee(pidA, pidB)
+		return h, p, true
 	}
 	souhaite, ok := pairPortFor(pidA, pidB)
 	if !ok {
@@ -368,7 +379,7 @@ func (ps *pairSocket) boucle() {
 		ps.recus++
 		ps.mu.Unlock()
 
-		dst := ps.apparier(src)
+		dst := ps.apparier(src, buf[:n])
 		if dst == nil {
 			continue
 		}
@@ -385,8 +396,8 @@ func (ps *pairSocket) boucle() {
 //
 // L admission comparait l IP EXACTE, et l IP attendue vient de la connexion NEX (le
 // WebSocket de controle) alors que le jeu emet son UDP par une autre sortie. Sous CGNAT les
-// deux diffèrent : mesure du 2026-08-31, une paire attendait 45.186.208.118 et recevait de
-// 45.186.208.68 — 88 paquets refuses, zero relaye, la partie morte.
+// deux diffèrent : mesure du 2026-08-31, une paire attendait 203.0.113.118 et recevait de
+// 203.0.113.68 — 88 paquets refuses, zero relaye, la partie morte.
 //
 // Le /24 est un compromis assume : il couvre les pools CGNAT sans ouvrir le port a tout
 // Internet. Le port reste dedie a UNE paire, tire au hasard parmi 900 et ferme apres deux
@@ -409,9 +420,16 @@ func admis(attendu, src string) bool {
 	return attendu == src || memeReseau(attendu, src)
 }
 
+// piaEnTete dit si un datagramme commence par l en-tete des paquets Pia relayes, 32 ab 98 64
+// (mesure : les 332 paquets de un outil interne le portent tous).
+func piaEnTete(p []byte) bool {
+	return len(p) >= 4 && p[0] == 0x32 && p[1] == 0xab && p[2] == 0x98 && p[3] == 0x64
+}
+
 // apparier rend l autre extremite pour un paquet donne, en apprenant les endpoints au fil
-// de l eau et en refusant tout ce qui ne vient pas des deux adresses attendues.
-func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
+// de l eau et en refusant tout ce qui ne vient pas des deux adresses attendues (sauf
+// l adoption d une place jamais vue, plus bas).
+func (ps *pairSocket) apparier(src *net.UDPAddr, paquet []byte) *net.UDPAddr {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -454,6 +472,32 @@ func (ps *pairSocket) apparier(src *net.UDPAddr) *net.UDPAddr {
 					ps.port, i+1, ancien, src)
 
 				return ps.vus[1-i]
+			}
+		}
+
+		// Place JAMAIS vue alors que l autre l est : l UDP de ce joueur sort par une
+		// adresse sans rapport avec sa connexion NEX (ni meme /24, ni meme /16, absente de
+		// ses stations). Prod du 17/10 00:30Z a 02:01Z : 6 ports morts ainsi (relayes=0,
+		// 22 a 156 paquets refuses, d une a trois sources par port), dont 3 pour le meme
+		// hote, et 10 verdicts FAILED relayes pour 5 joueurs. On adopte pour cette place la
+		// premiere source inconnue qui
+		// parle Pia (piaEnTete), une seule fois par port, avec une ligne de journal.
+		//
+		// Risque borne : sans adoption, ce que l autre joueur envoie est jete (pas de
+		// destination) ; avec, il part vers la source adoptee. Et si le vrai joueur se
+		// presente ensuite depuis son adresse attendue, il reprend sa place par le
+		// remappage ci-dessus : c est pour cela que l adoption est reservee, comme lui, a
+		// deux adresses attendues distinguables par reseau.
+		if !ps.adopte && piaEnTete(paquet) {
+			for i := range ps.vus {
+				if ps.vus[i] == nil && ps.vus[1-i] != nil {
+					ps.vus[i] = src
+					ps.adopte = true
+					fmt.Printf("[relais-paire] :%d extremite %d ADOPTEE = %s (hors des adresses attendues, paquet Pia, l autre extremite parle deja)\n",
+						ps.port, i+1, src)
+
+					return ps.vus[1-i]
+				}
 			}
 		}
 	}
@@ -608,8 +652,7 @@ func relayPointStation(u *StationURL, host string, port int) *StationURL {
 // L ancienne version repointait TOUTES les stations, donc leur donnait la meme adresse ET le
 // meme port : le visiteur recevait deux candidats identiques, et perdait au passage le CID de
 // l hote que porte la station LAN — celui dont sa Pia a besoin pour MONTER la session apres
-// le percage. La branche relay-fallback avait deja mesure la meme chose en production
-// (472c9d0) : le visiteur appelle EndParticipation des reception, avant meme de sonder. C est
+// le percage. Une version anterieure avait deja mesure la meme chose en production : le visiteur appelle EndParticipation des reception, avant meme de sonder. C est
 // l explication la plus probable des 85% de verdicts FAILED du 2026-08-31.
 //
 // La publique est reperee par ADRESSE (selectStations), pas par la presence de Pa : Splatoon 2

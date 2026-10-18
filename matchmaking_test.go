@@ -13,7 +13,7 @@ func TestMatchmakeSessionRoundTrip(t *testing.T) {
 
 	orig := &MatchmakeSession{
 		Gathering: Gathering{
-			ID: 1234, OwnerPID: 1800000000, HostPID: 1800000001,
+			ID: 1234, OwnerPID: 1800000000, HostPID: 1807000001,
 			MinParticipants: 2, MaxParticipants: 12,
 			ParticipationPolicy: 1, PolicyArgument: 0,
 			Flags: 512, State: 1, Description: "race",
@@ -50,7 +50,7 @@ func TestMatchmakeSessionRoundTrip(t *testing.T) {
 	}
 
 	// Base (Gathering) level.
-	if got.ID != 1234 || got.OwnerPID != 1800000000 || got.HostPID != 1800000001 ||
+	if got.ID != 1234 || got.OwnerPID != 1800000000 || got.HostPID != 1807000001 ||
 		got.MaxParticipants != 12 || got.Flags != 512 || got.Description != "race" {
 		t.Fatalf("gathering level: %+v", got.Gathering)
 	}

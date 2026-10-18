@@ -14,16 +14,7 @@ import (
 // ranking.go stocke ce bloc TEL QUEL et le rediffuse, ce qui suffit à faire
 // réapparaître pseudos et drapeaux en course, sans interpréter le format. Ce
 // fichier fait la seule chose que ce choix laissait de côté : LIRE le nom. Ce
-// n'est pas nécessaire au jeu ; ça l'est à la modération.
-//
-// Le serveur ne voit jamais la course — elle se joue en P2P — et /api/stats ne
-// sait produire que « Joueur-<pid> ». Un signalement (« untel trichait ») ne peut
-// donc être rattaché à personne. Or des joueurs se présentent sous le nom d'un
-// AUTRE, ou sans nom, ou en « Player » : bannir sur la foi d'un nom reviendrait
-// à bannir la VICTIME de l'usurpation plutôt que son auteur. Lire le nom déposé
-// par un PID authentifié rend trois cas détectables sans rien voir de la course :
-// un nom qui appartient à un autre compte, un nom vide ou générique, un nom qui
-// change d'une session à l'autre.
+// n'est pas nécessaire au jeu ; ça sert à l'affichage (tableaux de bord).
 //
 // Disposition relevée sur la capture Nintendo du 2026-08-12 (bloc de 132 octets),
 // telle que documentée en tête de ranking.go :
@@ -34,7 +25,7 @@ import (
 //	[96:132]  pseudo en jeu, un octet par caractère, terminé par 0
 //
 // Tout ce qui sort d'ici vient du CLIENT. C'est une donnée hostile, pas une
-// identité : bornée, nettoyée, et jamais suffisante à elle seule pour sanctionner.
+// identité : bornée, nettoyée, et jamais une preuve d'identité.
 
 // Disposition ETABLIE sur 4 371 profils réels relevés en production, et non sur
 // une seule capture : tous font exactement 132 octets, le nom Mii est lisible en
@@ -55,8 +46,8 @@ const (
 	// Pseudo en jeu : un octet par caractère, terminé par 0, jusqu'à la fin du bloc.
 	commonDataNickOff = 96
 	// commonDataMaxNameRunes borne ce qui ressort. Le client peut déposer ce
-	// qu'il veut ; un nom démesuré dans un journal ou une interface de
-	// modération serait un moyen de nuire, pas un nom.
+	// qu'il veut ; un nom démesuré dans un journal ou une interface
+	// serait un moyen de nuire, pas un nom.
 	commonDataMaxNameRunes = 32
 )
 
@@ -64,7 +55,7 @@ const (
 //
 // ok vaut false quand le bloc ne correspond pas à la disposition connue : trop
 // court, ou signature absente. Ce n'est pas une erreur à ignorer — un profil
-// non conforme déposé par une connexion authentifiée mérite d'être remonté.
+// non conforme est journalisé.
 func CommonDataNames(blob []byte) (miiName, nickname string, ok bool) {
 	if len(blob) != commonDataBlobLen {
 		return "", "", false
@@ -119,9 +110,8 @@ func sanitizeName(s string) string {
 	return strings.TrimSpace(sb.String())
 }
 
-// CommonDataNamesForPID rend les noms du profil déjà stocké pour ce PID. C'est
-// le point d'entrée d'une consultation de modération : partir du PID, qui est
-// authentifié, et non du nom, qui ne l'est pas.
+// CommonDataNamesForPID rend les noms du profil déjà stocké pour ce PID. Le PID
+// fait foi, jamais le nom (donnée du client).
 func CommonDataNamesForPID(pid uint64) (miiName, nickname string, ok bool) {
 	blob := CommonData(pid)
 	if blob == nil {
@@ -136,16 +126,14 @@ func CommonDataNamesForPID(pid uint64) (miiName, nickname string, ok bool) {
 // protégés. On l'allume quand on enquête, pas en permanence.
 var logProfileNames = os.Getenv("NEXTENDO_LOG_PROFILE_NAMES") == "1"
 
-// logCommonDataNames trace le nom annoncé par un PID authentifié : de quoi
-// rattacher un signalement à un compte, ce qu'aucune autre trace ne permet.
+// logCommonDataNames trace le nom annoncé par un PID (NEXTENDO_LOG_PROFILE_NAMES=1).
 func logCommonDataNames(pid uint64, blob []byte) {
 	if !logProfileNames {
 		return
 	}
 	mii, nick, ok := CommonDataNames(blob)
 	if !ok {
-		// Un bloc non conforme est plus intéressant qu'un bloc ordinaire : on le
-		// signale même si on ne sait pas le lire.
+		// Un bloc non conforme est journalisé même si on ne sait pas le lire.
 		fmt.Printf("[Ranking] profil NON CONFORME pid=%d taille=%d\n", pid, len(blob))
 		return
 	}

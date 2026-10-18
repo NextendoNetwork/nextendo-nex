@@ -169,3 +169,76 @@ func (a *AutoMatchmakeParam) Levels() []Level {
 		Load: func(i *StreamIn) { i.Extract(&a.Session) },
 	}}
 }
+
+// JoinMatchmakeSessionParam est le parametre de JoinMatchmakeSessionWithParam (0x6D.0x27).
+//
+// Ordre RELEVE dans le serialiseur du jeu (Smash 13.0.5, main reloge 0x252b30, appele par
+// MatchmakeExtensionClient::JoinMatchmakeSessionWithParam 0x24e600, methode 0x27 posee en
+// 0x24e6f8) : u32 gid (+0xc), List<PID> (u64 chacun, +0x10), u32 (+0x28), u32 (+0x2c),
+// u8 (+0x30), String mot de passe utilisateur (+0x38), String mot de passe systeme (+0x60),
+// String message (+0x88), u16 (+0xb0), u16 (+0xb2), MatchmakeBlockListParam (+0xb8).
+// Le mot de passe saisi par le joueur arrive en +0x38 : Smash le passe a
+// JoinSessionSetting::SetUserPassword (0xd0600, appel unique en 0x3708b78, 8 caracteres au
+// plus, tampon +4..+0xc de sa requete), et Pia le recopie dans ce champ (0xe4904).
+type JoinMatchmakeSessionParam struct {
+	GID                      uint32
+	Participants             []uint64
+	GIDForParticipationCheck uint32
+	Option                   uint32
+	Behavior                 uint8
+	UserPassword             string
+	SystemPassword           string
+	JoinMessage              string
+	ParticipationCount       uint16
+	ExtraParticipants        uint16
+	BlockList                MatchmakeBlockListParam
+}
+
+// Levels implements Structure.
+func (p *JoinMatchmakeSessionParam) Levels() []Level {
+	return []Level{{
+		Save: func(o *StreamOut) {
+			o.U32(p.GID)
+			WriteList(o, p.Participants, func(o *StreamOut, v uint64) { o.PID(v) })
+			o.U32(p.GIDForParticipationCheck)
+			o.U32(p.Option)
+			o.U8(p.Behavior)
+			o.String(p.UserPassword)
+			o.String(p.SystemPassword)
+			o.String(p.JoinMessage)
+			o.U16(p.ParticipationCount)
+			o.U16(p.ExtraParticipants)
+			o.Add(&p.BlockList)
+		},
+		Load: func(i *StreamIn) {
+			p.GID = i.U32()
+			p.Participants = ReadList(i, func(i *StreamIn) uint64 { return i.PID() })
+			p.GIDForParticipationCheck = i.U32()
+			p.Option = i.U32()
+			p.Behavior = i.U8()
+			p.UserPassword = i.String()
+			p.SystemPassword = i.String()
+			p.JoinMessage = i.String()
+			p.ParticipationCount = i.U16()
+			p.ExtraParticipants = i.U16()
+			i.Extract(&p.BlockList)
+		},
+	}}
+}
+
+// lireParamRejoindre lit le GID puis, si possible, le mot de passe d'une requete 0x6D.0x27.
+// motDePasseLu est faux quand le corps s'arrete avant la fin du mot de passe utilisateur :
+// une arene protegee ne s'ouvre alors pas. Les champs suivants ne sont pas exiges (seul le
+// GID l'etait jusqu'ici, pour les arenes sans mot de passe rien ne change).
+func lireParamRejoindre(body []byte, s *Settings) (p JoinMatchmakeSessionParam, motDePasseLu bool) {
+	in := NewStreamIn(body, s)
+	_ = in.U8() // version de structure
+	sub := in.Substream()
+	p.GID = sub.U32()
+	p.Participants = ReadList(sub, func(i *StreamIn) uint64 { return i.PID() })
+	p.GIDForParticipationCheck = sub.U32()
+	p.Option = sub.U32()
+	p.Behavior = sub.U8()
+	p.UserPassword = sub.String()
+	return p, in.Err() == nil && sub.Err() == nil
+}

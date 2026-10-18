@@ -204,7 +204,7 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 				continue
 			}
 			r := *g.session
-			r.UserPassword = ""
+			expurgerSessionProtegee(&r)
 			// Le PID annonce est celui de l'HOTE : c'est lui que le demandeur va
 			// rejoindre, et le client s'en sert pour identifier la partie.
 			results = append(results, &FindMatchmakeSessionByParticipantResult{
@@ -234,8 +234,9 @@ func (m *Matchmaking) findByParticipant(conn *Connection, req *RMCMessage) *RMCM
 		// la session P2P AVANT le JOIN — la mettre à nil laisse le visiteur avec une clé nulle,
 		// le handshake P2P n'aboutit pas et la visite cale sur « Getting ready to depart »
 		// (2618-0502). Ici le demandeur est un ami autorisé à visiter : aucune fuite. Le mot de
-		// passe reste retiré (ACNH n'en pose pas : le laissez-passer d'île est le Dodo Code).
-		r.UserPassword = ""
+		// passe reste retiré (ACNH n'en pose pas : le laissez-passer d'île est le Dodo Code), et
+		// la clé d'une session protégée par mot de passe aussi (expurgerSessionProtegee).
+		expurgerSessionProtegee(&r)
 		results = append(results, &FindMatchmakeSessionByParticipantResult{PrincipalID: pid, Session: r})
 	}
 	m.mu.Unlock()

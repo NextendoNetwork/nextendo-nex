@@ -123,8 +123,8 @@ func analyserValeursReglages(brut string) map[int]int32 {
 // Cela rend simplement le groupe 10 mesurable sans toucher au groupe qui fonctionne.
 // UtilityReglagesJeu : les reglages que le JEU fournit lui-meme, quand l'environnement n'en
 // donne aucun. Un jeu dont on connait les valeurs n'a pas a dependre d'une variable posee a
-// la main sur un conteneur — SMM2 tourne dans un `docker run` nu, ou ajouter une variable
-// veut dire le recreer de memoire.
+// la main sur un conteneur — SMM2 peut tourner sans orchestrateur, ou ajouter une variable
+// veut dire le recreer.
 //
 // L'ENVIRONNEMENT RESTE PRIORITAIRE : NEX_UTILITY_REGLAGES continue de tout ecraser, et les
 // groupes par index aussi. Ceci n'est qu'un defaut, pour ne pas rendre une carte VIDE a un

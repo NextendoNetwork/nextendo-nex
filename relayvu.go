@@ -77,3 +77,40 @@ func PaireRelayee(a, b uint64) bool {
 
 	return ok && time.Since(t) <= relayVuTTL
 }
+
+// Paires (arrivant, hote) dont les URL de session viennent d etre repointees vers le relais
+// par relayedFor. pushInitiateProbe ne repointe l InitiateProbe QUE pour ces paires : en
+// 2 contre 2, l arrivant recoit l adresse des autres membres par l hote (Pia), en direct ;
+// leur faire sonder le relais pendant que l arrivant les sonde en direct casserait le percage
+// a coup sur (SSBU, ouverture/conception.md 3.2). Duree courte : la sequence URL de session
+// -> RequestProbeInitiation prend quelques secondes.
+const sessionRelayeeTTL = 30 * time.Second
+
+var sessionsRelayees = map[[2]uint64]time.Time{}
+
+// NoterSessionRelayee retient que l arrivant a et l hote b viennent de recevoir le relais par
+// les URL de session.
+func NoterSessionRelayee(a, b uint64) {
+	if a == 0 || b == 0 {
+		return
+	}
+	vuMu.Lock()
+	defer vuMu.Unlock()
+	maintenant := time.Now()
+	if len(sessionsRelayees) > 4096 {
+		for k, t := range sessionsRelayees {
+			if maintenant.Sub(t) > sessionRelayeeTTL {
+				delete(sessionsRelayees, k)
+			}
+		}
+	}
+	sessionsRelayees[clePaire(a, b)] = maintenant
+}
+
+// SessionRelayee dit si la paire a recu le relais par les URL de session il y a moins de 30 s.
+func SessionRelayee(a, b uint64) bool {
+	vuMu.Lock()
+	defer vuMu.Unlock()
+	t, ok := sessionsRelayees[clePaire(a, b)]
+	return ok && time.Since(t) <= sessionRelayeeTTL
+}

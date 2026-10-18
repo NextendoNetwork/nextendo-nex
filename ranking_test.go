@@ -12,15 +12,15 @@ import (
 
 // Les neuf PID de la demande, dans l'ordre.
 var capturedPIDs = []string{
-	"419256a1cfd081c4", // 0 — pas de profil chez Nintendo
-	"5cf3e17a20566137", // 1 — Lucas
-	"665e5580b4eb1268", // 2 — yakibou
-	"bd5cfc6bfdf05056", // 3 — no name
-	"aa06cec732149492", // 4 — kaeloo
-	"468ac24ebb6aaee4", // 5 — pas de profil
-	"67c05ef9597ad531", // 6 — Iyovi
-	"253f7199c90a365e", // 7 — Papa
-	"1e28ae45a8cd4bad", // 8 — pas de profil
+	"1100000000000000", // entree
+	"1100000000001111", // entree
+	"1100000000002222", // entree
+	"1100000000003333", // entree
+	"1100000000004444", // entree
+	"1100000000005555", // entree
+	"1100000000006666", // entree
+	"1100000000007777", // entree
+	"1100000000008888", // entree
 }
 
 func pidFromHex(t *testing.T, s string) uint64 {
@@ -43,7 +43,7 @@ func TestUploadCommonDataStoresBlob(t *testing.T) {
 
 	blob := make([]byte, 132)
 	copy(blob, []byte{0x52, 0x46, 0x00, 0x00})
-	copy(blob[0x14:], []byte("M\x00o\x00h\x00a\x00"))
+	copy(blob[0x14:], []byte("T\x00e\x00s\x00t\x00"))
 
 	body := NewStreamOut(s)
 	body.Buffer(blob)

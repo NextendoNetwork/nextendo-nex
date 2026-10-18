@@ -132,11 +132,22 @@ type StreamIn struct {
 	data     []byte
 	pos      int
 	err      error
+	// strict : une erreur de lecture DANS une Structure (sous-flux de ReadStructure) remonte
+	// au flux parent. Par defaut elle reste dans le sous-flux (lecture tolerante de toujours).
+	strict bool
 }
 
 // NewStreamIn returns an input stream over data bound to the given settings.
 func NewStreamIn(data []byte, s *Settings) *StreamIn {
 	return &StreamIn{data: data, Settings: s}
+}
+
+// newStreamInStrict : comme NewStreamIn, mais un contenu de Structure tronque ou illisible
+// met le flux entier en erreur (voir strict). Pour les lecteurs qui appliquent ce qu'ils lisent
+// (matchmaking_criteres.go, matchmaking_maj.go) : un corps coupe a l'interieur d'une Structure
+// rendait sinon des champs a zero sans erreur.
+func newStreamInStrict(data []byte, s *Settings) *StreamIn {
+	return &StreamIn{data: data, Settings: s, strict: true}
 }
 
 // Err returns the first read error encountered, or nil.
@@ -252,13 +263,22 @@ func (s *StreamIn) DateTime() uint64 { return s.U64() }
 func (s *StreamIn) StationURLValue() *StationURL { return ParseStationURL(s.String()) }
 
 // Substream reads a u32-length-prefixed blob and returns a stream over it.
-func (s *StreamIn) Substream() *StreamIn { return NewStreamIn(s.Buffer(), s.Settings) }
+func (s *StreamIn) Substream() *StreamIn {
+	return &StreamIn{data: s.Buffer(), Settings: s.Settings, strict: s.strict}
+}
 
 // Extract reads a NEX Structure into st.
 func (s *StreamIn) Extract(st Structure) { ReadStructure(s, st) }
 
+// lectureReserveMax : elements reserves d'avance par ReadList / ReadMap. Le compte annonce
+// n'est borne que par les octets restants : reserver n elements d'un coup faisait d'une
+// requete de 1 Mio une allocation de n x taille(T) (92 Mo pour 1 Mio de 0x73.64, relecture
+// Shared Content). Au-dela, la liste grandit avec les elements reellement lus.
+const lectureReserveMax = 256
+
 // ReadList reads a NEX List<T>. A count larger than the remaining bytes is
-// treated as corruption (each element occupies at least one byte).
+// treated as corruption (each element occupies at least one byte). Reading stops at the
+// first element that leaves the stream in error (the partial list is returned with Err set).
 func ReadList[T any](s *StreamIn, f func(*StreamIn) T) []T {
 	n := int(s.U32())
 	if n < 0 || n > s.Remaining() {
@@ -267,8 +287,8 @@ func ReadList[T any](s *StreamIn, f func(*StreamIn) T) []T {
 		}
 		return nil
 	}
-	out := make([]T, 0, n)
-	for i := 0; i < n; i++ {
+	out := make([]T, 0, min(n, lectureReserveMax))
+	for i := 0; i < n && s.err == nil; i++ {
 		out = append(out, f(s))
 	}
 	return out
@@ -283,8 +303,8 @@ func ReadMap[K comparable, V any](s *StreamIn, kf func(*StreamIn) K, vf func(*St
 		}
 		return nil
 	}
-	m := make(map[K]V, n)
-	for i := 0; i < n; i++ {
+	m := make(map[K]V, min(n, lectureReserveMax))
+	for i := 0; i < n && s.err == nil; i++ {
 		k := kf(s)
 		m[k] = vf(s)
 	}

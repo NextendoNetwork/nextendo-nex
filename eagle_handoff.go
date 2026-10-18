@@ -1,13 +1,9 @@
 package nex
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -102,55 +98,14 @@ func (n *NotificationEventV1) Levels() []Level {
 	}}
 }
 
-// eagleTokenPayload : ce que le jeton porte.
-//
-// Formats VERIFIES contre le serveur SMB35 de kinnay (AGPL — lu pour les faits du
-// protocole, jamais recopie). Chacun compte : le salon en DECIMAL, le PID en hexa sur
-// SEIZE chiffres avec les zeros de tete.
-type eagleTokenPayload struct {
-	ExpiresAt string `json:"expires_at"` // secondes epoch, en chaine
-	ServerEnv string `json:"server_env"` // "lp1"
-	ServerID  string `json:"server_id"`  // l'id du SALON, en decimal
-	UserID    string `json:"user_id"`    // le PID, hexa sur 16 chiffres
-}
+// ErrJetonEagleNonInclus : la signature des jetons du relais n'est pas incluse dans la
+// version publique du coeur.
+var ErrJetonEagleNonInclus = errors.New("eagle : signature des jetons du relais non incluse dans la version publique du coeur")
 
-// eagleToken : l'enveloppe signee. La charge utile y est un OBJET JSON imbrique, pas une
-// chaine encodee — on avait suppose l'inverse, et le jeu n'en voulait pas.
-type eagleToken struct {
-	Payload   eagleTokenPayload `json:"payload"`
-	Signature string            `json:"signature"`
-	Version   int               `json:"version"`
-}
-
-// BuildEagleToken fabrique le jeton qu'un joueur presentera au relais.
-//
-// La signature porte sur le JSON de la charge utile TELLE QU'ELLE SERA SERIALISEE, et
-// c'est NOTRE relais qui la verifiera : elle n'a a convaincre que nous-memes. Le client
-// ne fait que transporter la chaine.
+// BuildEagleToken fabrique, dans la version de production, le jeton qu'un joueur presente au
+// relais. Non inclus dans la version publique : toujours une erreur, aucun jeton.
 func BuildEagleToken(secret []byte, pid uint64, gid uint32, duree time.Duration) (string, error) {
-	charge := eagleTokenPayload{
-		ExpiresAt: strconv.FormatInt(time.Now().Add(duree).Unix(), 10),
-		ServerEnv: "lp1",
-		ServerID:  strconv.FormatUint(uint64(gid), 10),
-		UserID:    fmt.Sprintf("%016x", pid),
-	}
-	brut, err := json.Marshal(charge)
-	if err != nil {
-		return "", err
-	}
-
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(brut)
-
-	enveloppe, err := json.Marshal(eagleToken{
-		Payload:   charge,
-		Signature: base64.StdEncoding.EncodeToString(mac.Sum(nil)),
-		Version:   1,
-	})
-	if err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(enveloppe), nil
+	return "", ErrJetonEagleNonInclus
 }
 
 // SendEagleHandoff previent un participant de l'adresse du relais et lui remet son jeton.

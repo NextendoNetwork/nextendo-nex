@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -47,9 +48,9 @@ type RMCHandler func(conn *Connection, req *RMCMessage) *RMCMessage
 type Endpoint struct {
 	Settings *Settings
 
-	// Secure, when true, requires each CONNECT to present a valid Kerberos
-	// ticket (a game/secure server). SecureKey is the secure account's derived
-	// key used to decrypt the ticket. An insecure endpoint (the auth server)
+	// Secure, when true, marks a game/secure server: each CONNECT goes through the
+	// CONNECT verifier (verification_publique.go; none in the public version = refused).
+	// SecureKey is the secure account's derived key. An insecure endpoint (the auth server)
 	// leaves both zero and accepts an empty CONNECT payload.
 	Secure    bool
 	SecureKey []byte
@@ -79,6 +80,18 @@ type Endpoint struct {
 	connections map[uint32]*Connection
 	connMu      sync.Mutex
 	connCounter uint32
+
+	// MaxRMCSize, si > 0, borne la taille d'une requete RMC reassemblee depuis ses
+	// fragments : au-dela, la requete est jetee (une ligne de journal), la connexion reste.
+	// Sans borne, une suite de fragments sans fin faisait grossir le tampon de reassemblage
+	// sans limite. 0 (defaut) : pas de borne, comportement d'avant. En fin de structure :
+	// les champs d'avant gardent leur position.
+	MaxRMCSize int
+
+	// partis : trace des connexions fermees depuis moins de relayVuTTL (connpartie.go).
+	partisMu     sync.Mutex
+	partis       map[uint32]connPartie
+	partisMenage time.Time
 }
 
 // NewEndpoint returns an endpoint bound to the given settings.
@@ -116,6 +129,7 @@ func (e *Endpoint) unregisterConnection(c *Connection) {
 	e.connMu.Lock()
 	delete(e.connections, c.ID)
 	e.connMu.Unlock()
+	e.noterPartie(c)
 }
 
 // FindConnectionByID returns the live connection with the given id, or nil.
@@ -208,9 +222,11 @@ const (
 	stateClosed     = 2
 )
 
-// Connection is one PRUDP-Lite connection (one transport socket). All inbound
-// packets for a socket are fed through Feed from a single goroutine; the mutex
-// guards the outgoing counters so cross-connection server pushes stay safe.
+// Connection is one PRUDP-Lite connection (one transport socket). gws (ParallelEnabled)
+// can call Feed for the same socket from up to 8 goroutines at once: recvMu guards the
+// receive buffer, fragMu the fragment reassembly, state and the port-secure flags are
+// atomic. The mutex guards the outgoing counters so cross-connection server pushes stay
+// safe.
 type Connection struct {
 	Endpoint *Endpoint
 	Settings *Settings
@@ -263,7 +279,7 @@ type Connection struct {
 	pending   map[uint16][]byte
 	pendingMu sync.Mutex
 
-	state int
+	state atomic.Int32 // stateConnecting (zero value), stateConnected, stateClosed
 	mu    sync.Mutex
 
 	// lastSeen : date (UnixNano) du DERNIER paquet reçu de ce client. Sans elle, rien ne
@@ -273,7 +289,79 @@ type Connection struct {
 	// qui bloquaient leur propriétaire (« ce compte joue déjà ailleurs ») et faussaient les
 	// compteurs. Atomique : écrite sur le chemin chaud de réception, lue par le reaper.
 	lastSeen atomic.Int64
+
+	// natMu / nat : etat « pret » (ReplaceURL fait depuis la derniere remise a zero), les
+	// InitiateProbe retenus pour cette connexion et ses sondages sans verdict. Voir natpret.go.
+	// En fin de structure : les champs d'avant gardent leur position.
+	natMu sync.Mutex
+	nat   natEtat
+
+	// fragRejet : la requete en cours de reassemblage a depasse Endpoint.MaxRMCSize ; ses
+	// fragments suivants sont jetes jusqu'au dernier (FragmentID 0). journalAvantConnect :
+	// la DATA recue avant le CONNECT a ete journalisee (une ligne par connexion).
+	fragRejet           bool
+	journalAvantConnect atomic.Bool
+
+	// connecteUneFois : un CONNECT a ete accepte sur cette connexion (ticket valide sur le
+	// port secure). Jamais remis a faux : une connexion connectee puis fermee (reaper, kick,
+	// DISCONNECT) reste servie comme avant. La garde du port secure s'appuie sur lui et non
+	// sur l'etat : close() fait passer une connexion jamais connectee a « fermee », et
+	// l'ancienne garde (etat « en connexion ») laissait alors passer SYN, DISCONNECT puis
+	// DATA sous le PID 0. Atomique : ecrit par processCONNECT, lu a chaque DATA, et gws
+	// traite jusqu'a 8 messages a la fois par socket.
+	connecteUneFois atomic.Bool
+
+	// recvMu : recvBuf (Feed). fragMu : fragBuf et fragRejet (processData). Sans eux, deux
+	// messages d'une meme socket traites en meme temps par gws ecrivaient le meme tampon :
+	// une requete pouvait etre decodee et servie deux fois (TestFeedEnParalleleSurUneSocket :
+	// 870 requetes servies pour 800 envoyees). Les gestionnaires RMC restent appeles hors
+	// verrou, en parallele comme avant.
+	recvMu sync.Mutex
+	fragMu sync.Mutex
+
+	// connectMu serialise les CONNECT d'une connexion (gws en traite plusieurs a la fois).
+	// cycleMu ordonne l'entree (enregistrement, OnConnect) et la sortie (close, OnDisconnect)
+	// : OnDisconnect ne part jamais avant OnConnect. close() ne prend que cycleMu, jamais
+	// connectMu : close() part de la boucle de lecture de gws (OnClose, reader.go) ou du
+	// reaper, pendant qu'un CONNECT peut tenir connectMu. Une erreur d'ecriture de gws 1.10.0
+	// (WriteMessage, conn.go) marque seulement la socket fermee, sans appeler OnClose.
+	connectMu sync.Mutex
+	cycleMu   sync.Mutex
+	// connectPayload / connectPID : le CONNECT accepte (charge utile et PID prouve par son
+	// ticket). journalConnect : un CONNECT refuse apres le premier a ete journalise (une
+	// ligne par connexion).
+	connectPayload []byte
+	connectAck     []byte
+	journalConnect atomic.Bool
+
+	// rmcEnVol : gestionnaires RMC en cours pour cette connexion (lancerRMC), pose par le
+	// transport WebSocket (Server.OnOpen). nil : appel direct, dans l'appelant de Feed (tests,
+	// usages sans transport), comme avant.
+	rmcEnVol chan struct{}
+
+	// SansTicket : selon le verificateur de CONNECT (verification_publique.go), l'identite de
+	// cette connexion ne vient pas d'un ticket. Pose avant OnConnect, jamais modifie ensuite.
+	SansTicket bool
+
+	// socketProlongee : derniere fois (UnixNano) que le transport WebSocket a repousse
+	// l'echeance de lecture de la socket (server.go, prolongerSocket).
+	socketProlongee atomic.Int64
+
+	// seqRecus : numeros de sequence des DATA fiables deja recues, une case par
+	// PacketID%256, qui garde PacketID+1 (0 = case jamais servie). Sous fragMu. Une DATA
+	// reemise par la console (ACK perdu ou en retard) porte le meme numero : elle est
+	// acquittee de nouveau et jetee (processData). Voir seqDejaRecu.
+	seqRecus [256]uint32
+
+	// natmSonde : natm de la derniere station que la console a fait sonder
+	// (RequestProbeInitiationExt) ; repli de natmStation. Ecrit par sa goroutine, lu par
+	// celles des autres (verdicts, appariement) : atomique.
+	natmSonde atomic.Int32
 }
+
+// rmcEnVolMax : gestionnaires RMC simultanes par connexion, la borne de gws avant
+// (ParallelGolimit 8). Au-dela, la lecture de la socket attend qu'un gestionnaire finisse.
+const rmcEnVolMax = 8
 
 // IdleFor renvoie depuis combien de temps ce client n'a envoyé aucun paquet.
 func (c *Connection) IdleFor() time.Duration {
@@ -334,22 +422,24 @@ func NewConnection(e *Endpoint, remoteAddr string, send func([]byte)) *Connectio
 		outReliable: 1,
 		outPing:     1,
 		pending:     map[uint16][]byte{},
-		state:       stateConnecting,
 	}
 }
 
 // Feed processes raw bytes from the transport (0+ complete packets, buffering a
 // trailing partial packet until the rest arrives).
 func (c *Connection) Feed(data []byte) {
+	c.recvMu.Lock()
 	c.recvBuf = append(c.recvBuf, data...)
 	packets, rest, err := DecodePackets(c.recvBuf)
 	if err != nil {
 		// Framing is corrupt; drop the buffer and keep the connection so a
 		// following clean packet can recover.
 		c.recvBuf = nil
+		c.recvMu.Unlock()
 		return
 	}
 	c.recvBuf = rest
+	c.recvMu.Unlock()
 	for _, p := range packets {
 		c.handlePacket(p)
 	}
@@ -370,6 +460,22 @@ func (c *Connection) handlePacket(p *Packet) {
 			c.processCONNECT(p)
 		}
 	case PacketDATA:
+		// Port secure : aucune DATA avant un CONNECT accepte (ticket valide). Sans cette
+		// garde, une socket qui n'a jamais fait de CONNECT faisait executer n'importe quel
+		// gestionnaire RMC sous le PID 0 (dont RequestProbeInitiationExt vers n'importe
+		// quelle connexion). Une console legitime n'envoie de DATA qu'apres le CONNECT-ACK :
+		// prod SSBU du 15/10 21:59 au 16/10 08:39, 0 requete RMC journalisee sous pid=0 et 0
+		// CONNECT refuse. Une connexion fermee (reaper, kick) apres un CONNECT accepte n'est
+		// pas concernee : servie comme avant. Une connexion fermee SANS CONNECT accepte
+		// (DISCONNECT ou socket fermee avant) reste refusee (connecteUneFois). Le port
+		// d'authentification (non secure) n'est pas concerne.
+		if c.Endpoint.Secure && !c.connecteUneFois.Load() {
+			if c.journalAvantConnect.CompareAndSwap(false, true) {
+				fmt.Printf("[PRUDP] DATA avant CONNECT depuis %s : ignoree (port secure)\n", c.RemoteAddr)
+			}
+
+			return
+		}
 		c.processData(p)
 	case PacketPING:
 		c.processPing(p)
@@ -421,13 +527,8 @@ func (c *Connection) processSYN(p *Packet) {
 
 	ack := &Packet{
 		Type: PacketSYN,
-		// HasSize belongs on the SYN-ACK, exactly like the CONNECT-ACK below. Without it
-		// the client completes the handshake but then sends its CONNECT with an EMPTY
-		// payload — it never hands over its Kerberos ticket, so the session is never
-		// really authenticated (which is what forced the PID-by-IP workaround). Wire
-		// measured of the secure connection with the client held constant: proven server
-		// SYN-ACK ACK|HASSIZE -> CONNECT plen=104; ours SYN-ACK ACK -> CONNECT plen=0,
-		// the only remaining difference across the whole handshake.
+		// HasSize sur le SYN-ACK, comme sur le CONNECT-ACK ; le SYN-ACK de Nintendo ne le porte
+		// pas (drapeaux 0x001).
 		Flags:      FlagACK | FlagHasSize,
 		SourceType: c.srcType, SourcePort: c.srcPort,
 		DestType: c.dstType, DestPort: c.dstPort,
@@ -446,14 +547,73 @@ func (c *Connection) processCONNECT(p *Packet) {
 		return // invalid — ignore
 	}
 
-	response, err := c.processLoginRequest(p.Payload)
+	// Un seul CONNECT accepte par connexion. Avant, chaque CONNECT valide recu sur une
+	// connexion deja connectee la re-enregistrait sous un NOUVEL identifiant, relancait une
+	// goroutine retransmitLoop et rappelait OnConnect ; close() ne retirait que le dernier
+	// identifiant : les autres restaient dans e.connections pour toujours (revue t4 :
+	// 6393 CONNECT sur une socket = 6393 entrees et goroutines, 406 Mio en moins d'une
+	// seconde par le vrai transport, au-dela de la memoire du conteneur). En prod, des consoles
+	// envoient deja leur CONNECT en double sur la meme socket (4 adresses, a moins de 1,3 s,
+	// ou dans les memes 40 microsecondes) : la console attend une reponse, on la lui rend.
+	c.connectMu.Lock()
+	defer c.connectMu.Unlock()
+	if c.state.Load() == stateClosed {
+		// Connexion fermee (DISCONNECT, socket fermee, reaper) : un CONNECT encore en file
+		// (gws) ne la ressuscite pas.
+		c.journalConnectRefuse("connexion fermee")
+		return
+	}
+	if c.connecteUneFois.Load() {
+		c.connectRejoue(p)
+		return
+	}
+
+	login, err := c.processLoginRequest(p.Payload)
 	if err != nil {
 		fmt.Printf("[PRUDP] CONNECT login failed from %s: %v (payload=%d bytes)\n", c.RemoteAddr, err, len(p.Payload))
 		return // bad ticket — ignore
 	}
-	fmt.Printf("[PRUDP] CONNECT ok from %s pid=%d secure=%v\n", c.RemoteAddr, c.PID, c.Endpoint.Secure)
+	enc := c.connectAckDe(login.response)
 
-	ack := &Packet{
+	// Entree sous cycleMu : enregistrement, retransmitLoop et OnConnect AVANT l'envoi du
+	// CONNECT-ACK (la premiere DATA de la console, qui suit cet ACK, trouve la connexion
+	// connectee et deja vue par OnConnect). Si close() est passe entre-temps, rien.
+	if !c.entrerConnecte(login, p.Payload, enc) {
+		c.journalConnectRefuse("connexion fermee pendant le CONNECT")
+		return
+	}
+
+	c.send(enc)
+}
+
+// entrerConnecte (sous connectMu) : passage a « connectee », enregistrement, retransmitLoop et
+// OnConnect, sous cycleMu rendu par defer (une panique dans OnConnect ne le garde pas pris :
+// close() attendrait sinon pour toujours). false : close() est passe avant, rien n'est fait.
+func (c *Connection) entrerConnecte(login loginConnect, payload, enc []byte) bool {
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
+	if !c.state.CompareAndSwap(stateConnecting, stateConnected) {
+		return false
+	}
+	if login.secure {
+		c.PID, c.CID, c.sessionKey = login.pid, login.cid, login.sessionKey
+	}
+	c.SansTicket = login.sansTicket
+	c.connectPayload = append([]byte(nil), payload...)
+	c.connectAck = enc
+	c.connecteUneFois.Store(true)
+	fmt.Printf("[PRUDP] CONNECT ok from %s pid=%d secure=%v\n", c.RemoteAddr, c.PID, c.Endpoint.Secure)
+	c.Endpoint.registerConnection(c)
+	go c.retransmitLoop() // re-send unacked reliable packets (large-payload reliability)
+	if c.Endpoint.OnConnect != nil {
+		c.Endpoint.OnConnect(c)
+	}
+	return true
+}
+
+// connectAckDe encode le CONNECT-ACK portant la reponse de connexion.
+func (c *Connection) connectAckDe(response []byte) []byte {
+	return EncodePacket(&Packet{
 		Type:       PacketCONNECT,
 		Flags:      FlagACK | FlagHasSize,
 		SourceType: c.srcType, SourcePort: c.srcPort,
@@ -462,89 +622,57 @@ func (c *Connection) processCONNECT(p *Packet) {
 		SupportedFunc: c.supportedFunc,
 		PacketID:      1,
 		Payload:       response,
-	}
-	c.send(EncodePacket(ack))
+	})
+}
 
-	c.state = stateConnected
-	c.Endpoint.registerConnection(c)
-	go c.retransmitLoop() // re-send unacked reliable packets (large-payload reliability)
-	if c.Endpoint.OnConnect != nil {
-		c.Endpoint.OnConnect(c)
+// connectRejoue (sous connectMu) : CONNECT recu sur une connexion deja connectee. Meme
+// charge utile (retransmission de la console) : le MEME CONNECT-ACK. Autre charge utile :
+// verifiee comme un premier CONNECT ; si son ticket prouve le MEME PID, un CONNECT-ACK
+// portant sa reponse (comme avant pour la console), sinon rien. Dans les deux cas, aucun
+// nouvel enregistrement, aucune goroutine, aucun OnConnect, et le PID ne change pas.
+func (c *Connection) connectRejoue(p *Packet) {
+	if equalBytes(p.Payload, c.connectPayload) {
+		c.send(c.connectAck)
+		return
+	}
+	login, err := c.processLoginRequest(p.Payload)
+	if err != nil || (login.secure && login.pid != c.PID) {
+		c.journalConnectRefuse(fmt.Sprintf("CONNECT rejoue avec un autre ticket (pid %d, erreur %v)", login.pid, err))
+		return
+	}
+	c.send(c.connectAckDe(login.response))
+}
+
+func (c *Connection) journalConnectRefuse(pourquoi string) {
+	if c.journalConnect.CompareAndSwap(false, true) {
+		fmt.Printf("[PRUDP] CONNECT ignore depuis %s pid=%d : %s\n", c.RemoteAddr, c.PID, pourquoi)
 	}
 }
 
-// processLoginRequest validates the CONNECT payload. For a secure endpoint the
-// payload is [buffer ticket][buffer request]; the ticket is decrypted with the
-// secure key to recover the session key + source PID, and the request is
-// decrypted with the session key to recover (PID, CID, check). The response is
-// [u32 4][u32 check+1], proving the server holds the session key.
-func (c *Connection) processLoginRequest(payload []byte) ([]byte, error) {
+// loginConnect : ce que prouve un CONNECT (rien n'est ecrit dans la connexion).
+type loginConnect struct {
+	response   []byte
+	secure     bool
+	pid        uint64
+	cid        uint32
+	sessionKey []byte
+	// sansTicket : l'identite ne vient pas d'un ticket (verificateur de CONNECT).
+	sansTicket bool
+}
+
+// processLoginRequest valide la charge utile d'un CONNECT. Endpoint non secure (auth) : rien
+// a verifier. Endpoint secure : l'identite est etablie par le verificateur de CONNECT, qui
+// n'est pas inclus dans la version publique du coeur (verification_publique.go) ; sans
+// verificateur installe, le CONNECT est refuse.
+func (c *Connection) processLoginRequest(payload []byte) (loginConnect, error) {
 	if !c.Endpoint.Secure {
-		return []byte{}, nil
+		return loginConnect{response: []byte{}}, nil
 	}
-
-	// Ticketless CONNECT. Some consoles reach the secure server WITHOUT a Kerberos ticket
-	// (empty CONNECT) because their source-key exchange isn't matched to our token
-	// derivation yet, so we still accept it — but ONLY as the identity that just
-	// authenticated from this very IP, and only within authRecallTTL.
-	//
-	// SECURITY: the CONNECT signature proves knowledge of the PUBLIC access key (baked into
-	// every game client), NOT identity. So an empty CONNECT must never be able to name an
-	// identity of its own. The two former fallbacks did exactly that and are removed:
-	//   - RecallRecentAuthPID(): the most recent login PID minted by ANYONE within 8s —
-	//     any attacker reaching this port could inherit a stranger's freshly-authenticated
-	//     account (and, via the one-place-online gate, evict the real owner).
-	//   - a placeholder PID in 1800000000+, which aliases real sequential account PIDs.
-	// A ticketless CONNECT with no same-IP recall is now REFUSED; the client must present a
-	// real ticket (the path every current player already uses).
-	if len(payload) == 0 {
-		pid, ok := RecallAuthPID(c.RemoteAddr)
-		if !ok {
-			return nil, fmt.Errorf("connect: ticketless CONNECT with no recent auth from this address")
-		}
-		// Same client authed a moment ago on the auth server: reuse that PID so the
-		// session it hosts is owned by the console's real identity.
-		c.PID = pid
-		fmt.Printf("[PRUDP] CONNECT anonymous (no ticket) from %s -> inherited auth pid=%d\n", c.RemoteAddr, c.PID)
-		return []byte{}, nil
-	}
-
-	in := NewStreamIn(payload, c.Settings)
-	ticketData := in.Buffer()
-	requestData := in.Buffer()
-	if in.Err() != nil {
-		return nil, in.Err()
-	}
-
-	ticket, err := DecryptServerTicket(ticketData, c.Endpoint.SecureKey, c.Settings)
+	reponse, id, err := verifierConnexion(c, payload)
 	if err != nil {
-		return nil, err
+		return loginConnect{}, err
 	}
-
-	decrypted, err := kerberosDecrypt(ticket.SessionKey, requestData)
-	if err != nil {
-		return nil, err
-	}
-	if len(decrypted) != c.Settings.PIDSize+8 {
-		return nil, fmt.Errorf("connect: bad check-data size %d", len(decrypted))
-	}
-
-	rs := NewStreamIn(decrypted, c.Settings)
-	pid := rs.PID()
-	if pid != ticket.Source {
-		return nil, fmt.Errorf("connect: pid %d != ticket source %d", pid, ticket.Source)
-	}
-	cid := rs.U32()
-	check := rs.U32()
-
-	c.PID = pid
-	c.CID = cid
-	c.sessionKey = ticket.SessionKey
-
-	out := NewStreamOut(c.Settings)
-	out.U32(4)
-	out.U32(check + 1)
-	return out.Bytes(), nil
+	return loginConnect{response: reponse, secure: true, pid: id.PID, cid: id.CID, sessionKey: id.CleSession, sansTicket: !id.Ticket}, nil
 }
 
 func (c *Connection) processData(p *Packet) {
@@ -571,13 +699,84 @@ func (c *Connection) processData(p *Packet) {
 	if p.HasFlag(FlagNeedACK) {
 		c.sendAck(p)
 	}
+	c.fragMu.Lock()
+	// DATA deja recue : la console la reemet quand l'ACK lui manque, avec le MEME numero
+	// de sequence. Elle vient d'etre acquittee de nouveau (plus haut), on ne la sert pas une
+	// seconde fois. Prod SSBU du 17/10 00:30Z a 03:40Z : 194 requetes servies deux fois sur
+	// la meme connexion (54 joueurs), dont des AutoMatchmake qui ouvraient un second salon
+	// fantome, et des fragments finaux reemis reassembles seuls (« size mismatch » avec un
+	// en-tete en texte ASCII).
+	if c.seqDejaRecu(p) {
+		c.fragMu.Unlock()
+
+		return
+	}
+	// Requete trop grosse (MaxRMCSize) : ses fragments sont acquittes (plus haut) et jetes
+	// jusqu'au dernier, sans rien garder ; la requete suivante repart de zero.
+	if limite := c.Endpoint.MaxRMCSize; limite > 0 && (c.fragRejet || len(c.fragBuf)+len(p.Payload) > limite) {
+		dejaRejete := c.fragRejet
+		c.fragRejet = p.FragmentID != 0
+		c.fragBuf = nil
+		c.fragMu.Unlock()
+		if !dejaRejete {
+			fmt.Printf("[PRUDP] pid=%d addr=%s requete RMC de plus de %d octets : jetee\n", c.PID, c.RemoteAddr, limite)
+		}
+
+		return
+	}
 	// Reassemble reliable fragments in arrival order (WebSocket is in-order).
 	c.fragBuf = append(c.fragBuf, p.Payload...)
-	if p.FragmentID == 0 {
-		full := c.fragBuf
+	var full []byte
+	complet := p.FragmentID == 0
+	if complet {
+		full = c.fragBuf
 		c.fragBuf = nil
-		c.dispatchRMC(full)
 	}
+	c.fragMu.Unlock()
+	if complet {
+		c.lancerRMC(full)
+	}
+}
+
+// seqDejaRecu (sous fragMu) dit si cette DATA fiable a deja ete recue, et la note sinon.
+//
+// Une case par PacketID%256, et non une fenetre monotone : les messages d'une socket
+// peuvent etre traites en parallele (TestFeedEnParalleleSurUneSocket), un numero plus petit
+// qu'un autre deja vu n'est pas pour autant un doublon. Une reemission arrive bien avant 256
+// DATA plus recentes (prod : moins de 2 s apres l'original) ; au-dela, elle serait servie
+// comme avant ce correctif. Les DATA non fiables ne sont pas concernees.
+func (c *Connection) seqDejaRecu(p *Packet) bool {
+	if !p.HasFlag(FlagReliable) {
+		return false
+	}
+	marque := uint32(p.PacketID) + 1
+	if c.seqRecus[p.PacketID%256] == marque {
+		return true
+	}
+	c.seqRecus[p.PacketID%256] = marque
+
+	return false
+}
+
+// lancerRMC sert une requete reassemblee. Avec le transport WebSocket (rmcEnVol pose), dans
+// sa propre goroutine : la lecture des messages suivants de la socket (ACK, PING, autres
+// requetes) ne depend pas d'un gestionnaire lent, et une panique d'un gestionnaire est
+// recuperee et journalisee (avant, par gws.Recovery) au lieu d'arreter le serveur.
+func (c *Connection) lancerRMC(full []byte) {
+	if c.rmcEnVol == nil {
+		c.dispatchRMC(full)
+		return
+	}
+	c.rmcEnVol <- struct{}{}
+	go func() {
+		defer func() { <-c.rmcEnVol }()
+		defer func() {
+			if v := recover(); v != nil {
+				fmt.Printf("[RMC] PANIQUE recuperee (pid=%d addr=%s) : %v\n%s\n", c.PID, c.RemoteAddr, v, debug.Stack())
+			}
+		}()
+		c.dispatchRMC(full)
+	}()
 }
 
 func (c *Connection) processPing(p *Packet) {
@@ -591,6 +790,17 @@ func (c *Connection) processPing(p *Packet) {
 
 func (c *Connection) dispatchRMC(payload []byte) {
 	req, err := ParseRMC(c.Settings, payload)
+	if err == nil && req.Mode == RMCResponse {
+		// Reponse de la console a une requete que le SERVEUR lui a poussee (InitiateProbe,
+		// nattraversal.go : call 0xFFFF0000 + call de l'appelant). Personne n'attend rien :
+		// ce n'est pas une requete abandonnee. Prod SSBU du 17/10 : 18 reponses d'erreur
+		// 0x80010002 a un InitiateProbe, journalisees jusque-la « requete ABANDONNEE (mode
+		// inattendu) ».
+		fmt.Printf("[RMC] reponse de pid=%d au push 0x%02x call=%#x : erreur=%v code=%#x\n",
+			c.PID, req.Protocol, req.CallID, req.IsError, req.Result)
+
+		return
+	}
 	if err != nil || req.Mode != RMCRequest {
 		// CE RETOUR ETAIT MUET, et c'est le pire endroit du serveur pour l'etre : une
 		// requete qu'on ne sait pas analyser est abandonnee SANS reponse, donc la console
@@ -679,7 +889,7 @@ func (c *Connection) sendData(data []byte) {
 		fragmentID := uint8(1)
 		rest := data
 		for {
-			if c.state == stateClosed {
+			if c.state.Load() == stateClosed {
 				return
 			}
 			chunk := rest
@@ -761,7 +971,7 @@ func (c *Connection) retransmitLoop() {
 	ticker := time.NewTicker(retransmitInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		if c.state == stateClosed {
+		if c.state.Load() == stateClosed {
 			return
 		}
 		c.pendingMu.Lock()
@@ -804,10 +1014,16 @@ func (c *Connection) sendAck(p *Packet) {
 }
 
 func (c *Connection) close() {
-	if c.state == stateClosed {
+	// cycleMu : un CONNECT en cours d'entree (enregistrement, OnConnect) se termine avant ;
+	// OnDisconnect ne part donc jamais avant OnConnect, et l'identifiant enregistre est
+	// bien celui qui est retire. Jamais connectMu (voir la structure).
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
+	// Swap : une seule fermeture effective meme si le DISCONNECT et la fermeture de la
+	// socket arrivent en meme temps (avant : OnDisconnect pouvait partir deux fois).
+	if c.state.Swap(stateClosed) == stateClosed {
 		return
 	}
-	c.state = stateClosed
 	c.Endpoint.unregisterConnection(c)
 	if c.Endpoint.OnDisconnect != nil {
 		c.Endpoint.OnDisconnect(c)

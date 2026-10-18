@@ -121,3 +121,67 @@ func (m *Matchmaking) MigrerHebergementDepuis(pid uint64, ep *Endpoint) int {
 
 	return len(faits)
 }
+
+// migrerSalonApresSortie: gid's owner has just LEFT it (EndParticipation) while others remain.
+// Same rule and same notice as MigrerHebergementDepuis, but for THIS gathering only: the
+// leaver may still host other gatherings it is in.
+//
+// SSBU prod, 10/17: 7 hosts left their Quick Play gathering ~3 s after a joiner arrived. The
+// gathering kept the departed host as owner; the joiner probed an absent host (InitiateProbe
+// -> 0x80010002 NotImplemented, "hote muet", up to 25 s of waiting) and the gathering stayed
+// offered to autoMatchmake (09:18:26 UTC, the departed host was put back into it). The original
+// service hands the gathering to a remaining participant when flag 0x10 is set (Smash: flags
+// 0xA10), otherwise deletes it.
+//
+// Returns true if the gathering was handed over.
+func (m *Matchmaking) migrerSalonApresSortie(gid uint32, ancien uint64, ep *Endpoint) bool {
+	if ep == nil {
+		return false
+	}
+	m.mu.Lock()
+	g := m.gatherings[gid]
+	if g == nil || g.session == nil || (g.session.OwnerPID != ancien && g.session.HostPID != ancien) {
+		m.mu.Unlock()
+		return false
+	}
+	var repreneur *Connection
+	for _, p := range g.participants {
+		if p == ancien {
+			continue
+		}
+		if c := ep.FindConnectionByPID(p); c != nil {
+			repreneur = c
+			break
+		}
+	}
+	if repreneur == nil {
+		m.mu.Unlock()
+		return false
+	}
+	g.session.HostPID = repreneur.PID
+	g.session.OwnerPID = repreneur.PID
+	g.hostConnID = repreneur.ID
+	reordonne := []uint64{repreneur.PID}
+	for _, p := range g.participants {
+		if p != repreneur.PID && p != ancien {
+			reordonne = append(reordonne, p)
+		}
+	}
+	g.participants = reordonne
+	g.session.NumParticipants = uint32(len(reordonne))
+	parts := append([]uint64(nil), reordonne...)
+	m.mu.Unlock()
+
+	fmt.Printf("[MM] hebergement gid=%d: owner %d left (EndParticipation) -> taken over by %d\n", gid, ancien, repreneur.PID)
+	for _, p := range parts {
+		if c := ep.FindConnectionByPID(p); c != nil {
+			SendNotification(c, &NotificationEvent{
+				PIDSource: ancien,
+				Type:      NotificationOwnershipChanged,
+				Param1:    uint64(gid),
+				Param2:    repreneur.PID,
+			})
+		}
+	}
+	return true
+}

@@ -131,7 +131,7 @@ func handleDataStoreGetUsers(conn *Connection, req *RMCMessage) *RMCMessage {
 	// C'est ce qui bloquait la publication des super mondes : le jeu demandait ses
 	// propres niveaux avec son NSA, recevait zero, et en concluait qu'ils avaient ete
 	// effaces de Course World. Mesure le 2026-08-28 — le meme nombre figure dans le
-	// journal d'authentification, ligne « NSA 11389664994428258486 -> account pid=... ».
+	// journal d'authentification, ligne « NSA 12345678901234567890 -> account pid=... ».
 	for i, id := range pids {
 		pids[i] = SMM2PIDJoueur(id)
 	}
@@ -313,7 +313,7 @@ func ecrireUserInfo(out *StreamOut, p SMM2Profil) {
 	// On ne peut pas savoir lequel autrement qu'en essayant, d'ou un masque de bits
 	// reglable sans redeploiement :
 	//
-	//   echo 7 > /opt/smm2/smm2_9998.forme   -> les trois a true  (defaut)
+	//   echo 7 > <dossier des donnees>/smm2_9998.forme   -> les trois a true  (defaut)
 	//   echo 1 > ...                         -> seul unk3
 	//   echo 2 > ...                         -> seul unk4
 	//   echo 4 > ...                         -> seul unk5
@@ -477,8 +477,8 @@ func codeMakerDe(pid uint64) string {
 // Super Mario Maker 2 ne demande pas les profils par notre PID interne : il les demande
 // par l'identifiant NSA de la console, celui qui sert a se connecter. Releve sur les
 // octets bruts d'une vraie requete le 2026-08-24 : la console reclamait
-// 11389664994428258486, qui est le NSA que l'authentification avait justement traduit
-// en PID 1800001206 quelques lignes plus haut dans le meme journal.
+// 12345678901234567890, qui est le NSA que l'authentification avait justement traduit
+// en PID 1807000009 quelques lignes plus haut dans le meme journal.
 //
 // On essaie donc, dans l'ordre :
 //  1. l'identifiant tel quel, au cas ou ce SERAIT deja un PID ;

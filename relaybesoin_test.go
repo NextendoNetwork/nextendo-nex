@@ -143,3 +143,128 @@ func TestHistoriqueSurvitAuMenage(t *testing.T) {
 		t.Fatal("l ardoise glissante, elle, devait expirer")
 	}
 }
+
+// TestUnEchecNATStrictSuffit : un seul echec de classe 0515 ou 0516 (natm 1 contre natm 2)
+// rend eligible ; les autres classes gardent le seuil de deux.
+func TestUnEchecNATStrictSuffit(t *testing.T) {
+	resetBesoins()
+	for i, classe := range []string{"0515", "0516"} {
+		pid := uint64(1800900101 + i)
+		NotePercageClasse(pid, false, classe)
+		if !BesoinDeRelais(pid) {
+			t.Fatalf("classe %s : un echec doit suffire", classe)
+		}
+	}
+	for i, classe := range []string{"0513", "0514", "0583-0586", "?", ""} {
+		pid := uint64(1800900111 + i)
+		NotePercageClasse(pid, false, classe)
+		if BesoinDeRelais(pid) {
+			t.Fatalf("classe %q : un seul echec ne doit pas suffire", classe)
+		}
+		NotePercageClasse(pid, false, classe)
+		if !BesoinDeRelais(pid) {
+			t.Fatalf("classe %q : deux echecs doivent suffire", classe)
+		}
+	}
+}
+
+// TestNATStrictMelangeEtSucces : un echec ordinaire suivi d un echec strict rend eligible ;
+// un succes direct efface tout, y compris la marque stricte ; une fenetre expiree aussi.
+func TestNATStrictMelangeEtSucces(t *testing.T) {
+	resetBesoins()
+	const pid = 1800900121
+	NotePercageClasse(pid, false, "0513")
+	NotePercageClasse(pid, false, "0516")
+	if !BesoinDeRelais(pid) {
+		t.Fatal("echec ordinaire + echec strict : doit etre eligible")
+	}
+	NotePercageClasse(pid, true, "0516")
+	if BesoinDeRelais(pid) {
+		t.Fatal("un succes direct doit effacer l eligibilite")
+	}
+	NotePercageClasse(pid, false, "0513")
+	if BesoinDeRelais(pid) {
+		t.Fatal("la marque stricte doit avoir ete effacee par le succes")
+	}
+
+	resetBesoins()
+	NotePercageClasse(pid, false, "0515")
+	besoinMu.Lock()
+	besoins[pid].dernier = time.Now().Add(-besoinFenetre - time.Minute)
+	besoinMu.Unlock()
+	if BesoinDeRelais(pid) {
+		t.Fatal("un echec strict hors fenetre ne doit plus rendre eligible")
+	}
+	NotePercageClasse(pid, false, "0513")
+	if BesoinDeRelais(pid) {
+		t.Fatal("fenetre expiree : la marque stricte ne doit pas survivre")
+	}
+	if n := BesoinStats(); n != 0 {
+		t.Fatalf("BesoinStats = %d, attendu 0", n)
+	}
+	NotePercageClasse(pid, false, "0513")
+	if l := BesoinListe(); len(l) != 1 || l[0] != pid {
+		t.Fatalf("BesoinListe = %v", l)
+	}
+}
+
+// TestNotePercageCompatible : l ancienne signature garde le seuil de deux.
+func TestNotePercageCompatible(t *testing.T) {
+	resetBesoins()
+	const pid = 1800900131
+	NotePercage(pid, false)
+	if BesoinDeRelais(pid) {
+		t.Fatal("NotePercage : un echec ne doit pas suffire")
+	}
+	NotePercage(pid, false)
+	if !BesoinDeRelais(pid) {
+		t.Fatal("NotePercage : deux echecs doivent suffire")
+	}
+}
+
+// TestVerdictNATStrictParLeHandler : chemin complet, ReportNATTraversalResult FAILED vers un
+// pair natm 2 depuis une console natm 1 (classe 0515) rend le joueur eligible des le premier
+// verdict ; vers un pair natm 1 (0513), il en faut deux.
+func TestVerdictNATStrictParLeHandler(t *testing.T) {
+	resetBesoins()
+	s := testSettings()
+	ep := NewEndpoint(s)
+	avec := func(addr string, pid uint64, natm int) *Connection {
+		c := NewConnection(ep, addr, func([]byte) {})
+		c.PID = pid
+		u := NewStationURL("prudp")
+		u.Set("address", "10.0.0.1")
+		u.SetInt("natm", natm)
+		c.SetStations([]*StationURL{u})
+		ep.registerConnection(c)
+		return c
+	}
+	verdict := func(c, pair *Connection) {
+		b := NewStreamOut(s)
+		b.U32(pair.ID)
+		b.Bool(false)
+		b.U32(0)
+		logNATResult(c, NewRMCRequest(s, ProtocolNATTraversal, MethodReportNATTraversalResult, 1, b.Bytes()))
+	}
+
+	local := avec("198.51.100.1:1", 1800900141, 1)
+	strict := avec("198.51.100.2:1", 1800900142, 2)
+	ouvert := avec("198.51.100.3:1", 1800900143, 1)
+	if got := classePia(local, strict); got != "0515" {
+		t.Fatalf("classe %s, attendu 0515", got)
+	}
+	verdict(local, strict)
+	if !BesoinDeRelais(local.PID) {
+		t.Fatal("un echec 0515 doit rendre eligible")
+	}
+
+	resetBesoins()
+	verdict(local, ouvert)
+	if BesoinDeRelais(local.PID) {
+		t.Fatal("un echec 0513 ne doit pas suffire")
+	}
+	verdict(local, ouvert)
+	if !BesoinDeRelais(local.PID) {
+		t.Fatal("deux echecs 0513 doivent rendre eligible")
+	}
+}

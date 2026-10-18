@@ -140,7 +140,7 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 		// one, and Pa ends up being the public address. We reproduce the resulting value, not
 		// the aliasing, so `local` stays a real LAN station for the P2P bridge. When the client
 		// DOES report its own public station, Pa is the LAN address, which is what a real
-		// console sends (measured ssbu_wsframes_2319: address=a player address, Pa=a local address).
+		// console sends (par exemple address=203.0.113.17, Pa=10.0.2.108).
 		// NOTE: both Pa variants are known to work on SSBU — the real console sends Pa=<LAN>
 		// and the proven server sends Pa=<public> — so the VALUE is not load-bearing there.
 		pa := local.Get("address")
@@ -153,6 +153,9 @@ func handleRegister(conn *Connection, req *RMCMessage, cfg SecureConnectionConfi
 	}
 
 	conn.SetStations([]*StationURL{local, public})
+	// Les stations du Register (port=1, ni CID ni natf/natm) ne servent a personne pour un
+	// percage : la connexion n'est prete qu'a son premier ReplaceURL (natpret.go).
+	conn.natRAZ("Register")
 	fmt.Printf("[Register] pid=%d -> local=%s\n           public=%s\n", conn.PID, local.String(), public.String())
 
 	out := NewStreamOut(s)
@@ -202,7 +205,20 @@ func handleReplaceURL(conn *Connection, req *RMCMessage) *RMCMessage {
 	conn.SetStations(rebuilt)
 
 	fmt.Printf("[ReplaceURL] pid=%d -> new=%s (now %d station(s))\n", conn.PID, newStation.String(), len(rebuilt))
-	return NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
+	resp := NewRMCSuccess(s, ProtocolSecureConnection, req.Method, req.CallID, nil)
+
+	// La connexion est prete (natpret.go), APRES SetStations : un visiteur qui attend la voit
+	// prete avec ses nouvelles stations, jamais avec les anciennes.
+	retenus := conn.natApresReplaceURL(newStation.GetInt("CID"))
+	if len(retenus) == 0 {
+		// Cas courant : rien d'autre a faire, la reponse part comme avant.
+		return resp
+	}
+	// Des InitiateProbe attendaient ce ReplaceURL : ils partent juste apres sa reponse.
+	conn.SendRMC(resp)
+	conn.natEnvoyerRetenus(retenus)
+
+	return nil
 }
 
 // selectStations picks the local (private-IP) and public (public-IP) stations

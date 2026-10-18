@@ -175,7 +175,7 @@ func TestSessionPartDoesNotPersistByDefault(t *testing.T) {
 // et un joueur déconnecté doit en disparaître.
 func TestFriendNotificationData(t *testing.T) {
 	m := NewMatchmaking()
-	const me, open, closed = uint64(1800000001), uint64(1800000002), uint64(1800000003)
+	const me, open, closed = uint64(1807000001), uint64(1807000002), uint64(1807000003)
 	m.FriendPIDs = func(pid uint64) []uint64 { return []uint64{open, closed} }
 
 	m.notif.put(open, 101, &NotificationEvent{PIDSource: open, Type: 101, Param1: 42, Param2: 1})    // porte OUVERTE
@@ -198,8 +198,8 @@ func TestFriendNotificationData(t *testing.T) {
 // Sans source d'amis configurée (MK8, S2, Smash), la réponse reste vide : rien ne change.
 func TestFriendNotificationsEmptyWithoutSource(t *testing.T) {
 	m := NewMatchmaking()
-	m.notif.put(1800000002, 101, &NotificationEvent{Type: 101})
-	if got := m.friendNotificationsFor(1800000001, []uint32{101}); len(got) != 0 {
+	m.notif.put(1807000002, 101, &NotificationEvent{Type: 101})
+	if got := m.friendNotificationsFor(1807000001, []uint32{101}); len(got) != 0 {
 		t.Fatalf("sans FriendPIDs la liste doit rester vide : %+v", got)
 	}
 }

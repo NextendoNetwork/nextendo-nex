@@ -66,14 +66,14 @@ type Tournament struct {
 }
 
 type tournamentStore struct {
-	mu          sync.RWMutex
-	byID        map[uint32]*Tournament
-	quarantined []*Tournament
-	nextID      uint32
+	mu        sync.RWMutex
+	byID      map[uint32]*Tournament
+	nonServis []*Tournament
+	nextID    uint32
 }
 
 var (
-	tournaments     = &tournamentStore{byID: map[uint32]*Tournament{}, quarantined: []*Tournament{}, nextID: 1000}
+	tournaments     = &tournamentStore{byID: map[uint32]*Tournament{}, nonServis: []*Tournament{}, nextID: 1000}
 	tournamentFile  = os.Getenv("NEXTENDO_TOURNAMENT_FILE")
 	tournamentOnce  sync.Once
 	tournamentDirty atomic.Bool
@@ -90,7 +90,7 @@ func tournamentInit() {
 			var list []*Tournament
 			if json.Unmarshal(b, &list) == nil {
 				tournaments.mu.Lock()
-				quarantinedCount := 0
+				nonServisCount := 0
 				for _, t := range list {
 					if t == nil || t.ID == 0 {
 						continue
@@ -100,8 +100,8 @@ func tournamentInit() {
 						tournaments.nextID = t.ID + 1
 					}
 					if !validStoredTournament(t) {
-						tournaments.quarantined = append(tournaments.quarantined, t)
-						quarantinedCount++
+						tournaments.nonServis = append(tournaments.nonServis, t)
+						nonServisCount++
 						continue
 					}
 					tournaments.byID[t.ID] = t
@@ -109,8 +109,8 @@ func tournamentInit() {
 				n := len(tournaments.byID)
 				tournaments.mu.Unlock()
 				fmt.Printf("[Tournoi] %d tournoi(s) restauré(s) depuis %s\n", n, tournamentFile)
-				if quarantinedCount != 0 {
-					fmt.Printf("[Tournoi] %d tournoi(s) invalide(s) mis en quarantaine (conservés sans être diffusés)\n", quarantinedCount)
+				if nonServisCount != 0 {
+					fmt.Printf("[Tournoi] %d tournoi(s) invalide(s) mis de cote (conservés sans être diffusés)\n", nonServisCount)
 				}
 			}
 		}
@@ -126,9 +126,9 @@ func tournamentFlusher() {
 			continue
 		}
 		tournaments.mu.RLock()
-		list := make([]*Tournament, 0, len(tournaments.byID)+len(tournaments.quarantined))
-		// Preserve quarantined entries so they are not wiped from disk
-		list = append(list, tournaments.quarantined...)
+		list := make([]*Tournament, 0, len(tournaments.byID)+len(tournaments.nonServis))
+		// Preserve nonServis entries so they are not wiped from disk
+		list = append(list, tournaments.nonServis...)
 		for _, v := range tournaments.byID {
 			list = append(list, v)
 		}

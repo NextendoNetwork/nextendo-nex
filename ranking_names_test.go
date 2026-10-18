@@ -26,15 +26,15 @@ func profilMK8(mii, pseudo string) []byte {
 }
 
 func TestCommonDataNamesLitLesDeuxNoms(t *testing.T) {
-	mii, pseudo, ok := CommonDataNames(profilMK8("Yaacob", "ya'akov"))
+	mii, pseudo, ok := CommonDataNames(profilMK8("MiiTest", "pilo'te"))
 	if !ok {
 		t.Fatal("bloc conforme refusé")
 	}
-	if mii != "Yaacob" {
-		t.Errorf("nom Mii : %q, attendu %q", mii, "Yaacob")
+	if mii != "MiiTest" {
+		t.Errorf("nom Mii : %q, attendu %q", mii, "MiiTest")
 	}
-	if pseudo != "ya'akov" {
-		t.Errorf("pseudo : %q, attendu %q", pseudo, "ya'akov")
+	if pseudo != "pilo'te" {
+		t.Errorf("pseudo : %q, attendu %q", pseudo, "pilo'te")
 	}
 }
 
@@ -80,7 +80,7 @@ func TestCommonDataNamesPseudoVide(t *testing.T) {
 }
 
 // Le nom vient du client. Un pseudo démesuré ne doit pas pouvoir inonder un
-// journal ni une interface de modération.
+// journal ni une interface.
 func TestCommonDataNamesBorneLaLongueur(t *testing.T) {
 	_, pseudo, ok := CommonDataNames(profilMK8("Mii", strings.Repeat("A", 200)))
 	if !ok {

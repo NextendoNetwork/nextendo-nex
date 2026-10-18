@@ -56,6 +56,11 @@ func TestMatchmakingCreateJoinAndURLs(t *testing.T) {
 		t.Fatalf("B session: %+v (want gid=%d host=1000 participants=2)", sessB, gid)
 	}
 
+	// A reports its new session (ReplaceURL), as a console does ~2-3 s after creating:
+	// until then its stations describe no live session and B's request would wait
+	// (natpret.go).
+	SecureConnectionHandler()(connA, replaceURLReq(s, 9, stA))
+
 	// B fetches the host's station URLs.
 	urlReq := NewStreamOut(s)
 	urlReq.U32(gid)

@@ -10,7 +10,7 @@ func TestTicketGrantingLoginEx(t *testing.T) {
 	s := testSettings()
 	const userPID = uint64(1800000000)
 	const securePID = uint64(2)
-	securePassword := "securepasswordplz1"
+	securePassword := "mot-de-passe-de-test"
 	sourceKey := []byte("nextendo-srckey1") // 16 bytes, handed back as pSourceKey
 
 	cfg := &AuthConfig{
@@ -92,7 +92,7 @@ func TestTicketGrantingRejectsUnknownUser(t *testing.T) {
 	cfg := &AuthConfig{
 		Settings:       s,
 		SecurePID:      2,
-		SecurePassword: "securepasswordplz1",
+		SecurePassword: "mot-de-passe-de-test",
 		ResolveUser: func(string, []byte) (uint64, []byte, bool) {
 			return 0, nil, false
 		},

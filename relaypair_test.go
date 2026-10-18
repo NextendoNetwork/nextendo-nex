@@ -14,7 +14,7 @@ func TestPairPortSymetriqueEtBorne(t *testing.T) {
 	SetPairRelay("203.0.113.10", 31000, 100)
 	defer SetPairRelay("", 0, 0)
 
-	for _, c := range [][2]uint64{{1, 2}, {1800000001, 9999}, {42, 42}} {
+	for _, c := range [][2]uint64{{1, 2}, {1807000001, 9999}, {42, 42}} {
 		a, okA := pairPortFor(c[0], c[1])
 		b, okB := pairPortFor(c[1], c[0])
 		if !okA || !okB {
@@ -147,16 +147,16 @@ func TestApparierRemappePortQuandLeNATChange(t *testing.T) {
 	a := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000}
 	b := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 2000}
 
-	if dst := ps.apparier(a); dst != nil {
+	if dst := ps.apparier(a, nil); dst != nil {
 		t.Fatalf("premier paquet: pas encore de pair, obtenu %v", dst)
 	}
-	if dst := ps.apparier(b); dst == nil || dst.Port != 1000 {
+	if dst := ps.apparier(b, nil); dst == nil || dst.Port != 1000 {
 		t.Fatalf("b doit etre relaye vers a, obtenu %v", dst)
 	}
 
 	// Meme IP que a, port different : le NAT a remappe.
 	a2 := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1234}
-	dst := ps.apparier(a2)
+	dst := ps.apparier(a2, nil)
 	if dst == nil || dst.Port != 2000 {
 		t.Fatalf("apres remap, a2 doit etre relaye vers b, obtenu %v", dst)
 	}
@@ -164,7 +164,7 @@ func TestApparierRemappePortQuandLeNATChange(t *testing.T) {
 		t.Fatalf("remaps=%d, attendu 1", ps.remaps)
 	}
 	// Et b doit desormais repartir vers le NOUVEAU port de a.
-	if dst := ps.apparier(b); dst == nil || dst.Port != 1234 {
+	if dst := ps.apparier(b, nil); dst == nil || dst.Port != 1234 {
 		t.Fatalf("b doit suivre le nouveau port de a, obtenu %v", dst)
 	}
 }
@@ -177,11 +177,11 @@ func TestApparierNeRemappePasSurIPPartagee(t *testing.T) {
 
 	a := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 1000}
 	b := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 2000}
-	ps.apparier(a)
-	ps.apparier(b)
+	ps.apparier(a, nil)
+	ps.apparier(b, nil)
 
 	c := &net.UDPAddr{IP: net.ParseIP("9.9.9.9"), Port: 3000}
-	if dst := ps.apparier(c); dst != nil {
+	if dst := ps.apparier(c, nil); dst != nil {
 		t.Fatalf("un troisieme port sur une IP partagee doit etre refuse, obtenu %v", dst)
 	}
 	if ps.remaps != 0 {
@@ -196,9 +196,9 @@ func TestApparierNeRemappePasSurIPPartagee(t *testing.T) {
 func TestApparierRefuseUneIPEtrangere(t *testing.T) {
 	ps := &pairSocket{port: 30502, rejetVu: map[string]uint64{}}
 	ps.attendus = [2]string{"1.1.1.1", "2.2.2.2"}
-	ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000})
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000}, nil)
 
-	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("6.6.6.6"), Port: 9}); dst != nil {
+	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("6.6.6.6"), Port: 9}, nil); dst != nil {
 		t.Fatalf("une IP hors liste doit etre refusee, obtenu %v", dst)
 	}
 	if ps.rejetVu["6.6.6.6:9"] != 1 {
@@ -207,21 +207,21 @@ func TestApparierRefuseUneIPEtrangere(t *testing.T) {
 }
 
 // TestAdmisMemeBlocCGNAT : le jeu emet son UDP par une autre sortie que la connexion NEX.
-// Mesure du 2026-08-31 : attendu 45.186.208.118, recu de 45.186.208.68, 88 paquets jetes.
+// Mesure du 2026-08-31 : attendu 203.0.113.118, recu de 203.0.113.68, 88 paquets jetes.
 func TestAdmisMemeBlocCGNAT(t *testing.T) {
 	ps := &pairSocket{port: 30600, rejetVu: map[string]uint64{}}
-	ps.attendus = [2]string{"45.186.208.118", "79.117.187.216"}
+	ps.attendus = [2]string{"203.0.113.118", "198.51.100.216"}
 
-	cgnat := &net.UDPAddr{IP: net.ParseIP("45.186.208.68"), Port: 62483}
-	autre := &net.UDPAddr{IP: net.ParseIP("79.117.187.216"), Port: 5000}
+	cgnat := &net.UDPAddr{IP: net.ParseIP("203.0.113.68"), Port: 62483}
+	autre := &net.UDPAddr{IP: net.ParseIP("198.51.100.216"), Port: 5000}
 
-	if dst := ps.apparier(cgnat); dst != nil {
+	if dst := ps.apparier(cgnat, nil); dst != nil {
 		t.Fatalf("premier paquet: pas encore de pair, obtenu %v", dst)
 	}
 	if ps.rejets != 0 {
 		t.Fatalf("le meme /24 doit etre admis, rejets=%d", ps.rejets)
 	}
-	if dst := ps.apparier(autre); dst == nil || dst.Port != 62483 {
+	if dst := ps.apparier(autre, nil); dst == nil || dst.Port != 62483 {
 		t.Fatalf("doit relayer vers la source CGNAT apprise, obtenu %v", dst)
 	}
 }
@@ -232,11 +232,11 @@ func TestPasDeRemapEntreDeuxJoueursDuMemeBloc(t *testing.T) {
 	ps := &pairSocket{port: 30601, rejetVu: map[string]uint64{}}
 	ps.attendus = [2]string{"88.1.2.3", "88.1.2.9"}
 
-	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.3"), Port: 1000})
-	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.9"), Port: 2000})
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.3"), Port: 1000}, nil)
+	ps.apparier(&net.UDPAddr{IP: net.ParseIP("88.1.2.9"), Port: 2000}, nil)
 
 	intrus := &net.UDPAddr{IP: net.ParseIP("88.1.2.77"), Port: 3000}
-	if dst := ps.apparier(intrus); dst != nil {
+	if dst := ps.apparier(intrus, nil); dst != nil {
 		t.Fatalf("pas de remap quand les deux attendus partagent le /24, obtenu %v", dst)
 	}
 	if ps.remaps != 0 {
@@ -248,7 +248,7 @@ func TestPasDeRemapEntreDeuxJoueursDuMemeBloc(t *testing.T) {
 func TestRefuseUnAutreReseau(t *testing.T) {
 	ps := &pairSocket{port: 30602, rejetVu: map[string]uint64{}}
 	ps.attendus = [2]string{"1.1.1.1", "2.2.2.2"}
-	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.2.1"), Port: 9}); dst != nil {
+	if dst := ps.apparier(&net.UDPAddr{IP: net.ParseIP("1.1.2.1"), Port: 9}, nil); dst != nil {
 		t.Fatalf("un /24 different doit etre refuse, obtenu %v", dst)
 	}
 	if ps.rejets != 1 {
@@ -264,8 +264,8 @@ func TestRefuseUnAutreReseau(t *testing.T) {
 func TestPairRelayForOrdreStable(t *testing.T) {
 	SetPairRelay("127.0.0.1", 39000, 50)
 	defer SetPairRelay("", 0, 0)
-	const pidA, pidB = uint64(1800000123), uint64(1800024323)
-	ipA, ipB := "70.40.81.34", "181.78.0.151"
+	const pidA, pidB = uint64(1807000008), uint64(1807000014)
+	ipA, ipB := "192.0.2.34", "198.51.100.151"
 	besoinPourTest(t, pidA, pidB)
 
 	_, port1, ok := PairRelayFor(pidA, pidB, ipA, ipB)
@@ -412,21 +412,21 @@ func TestStatsPaireMuetteEstComptee(t *testing.T) {
 // stationsHote reproduit la forme que natBridgeStations rend a un visiteur : un candidat LAN
 // portant le CID de l hote (sans type ni Pa) et un candidat public.
 func stationsHote() []*StationURL {
-	lan := ParseStationURL("prudp:/address=192.168.1.20;port=50001;CID=4242;PID=1800000009;RVCID=99;natf=34;natm=1")
-	pub := ParseStationURL("prudp:/address=70.40.81.34;port=50001;CID=4242;PID=1800000009;RVCID=99;natf=34;natm=1;type=3;Pa=192.168.1.20")
+	lan := ParseStationURL("prudp:/address=192.168.1.20;port=50001;CID=4242;PID=1807000004;RVCID=99;natf=34;natm=1")
+	pub := ParseStationURL("prudp:/address=192.0.2.34;port=50001;CID=4242;PID=1807000004;RVCID=99;natf=34;natm=1;type=3;Pa=192.168.1.20")
 
 	return []*StationURL{lan, pub}
 }
 
 // TestRelayStationsNeRepointeQueLaPublique : repointer AUSSI le candidat LAN donnait deux
 // stations identiques et faisait perdre le CID de l hote — mesure du 2026-08-31, 85% de
-// verdicts FAILED, et la branche relay-fallback avait vu le visiteur appeler EndParticipation
+// verdicts FAILED, et une version anterieure avait vu le visiteur appeler EndParticipation
 // des reception.
 func TestRelayStationsNeRepointeQueLaPublique(t *testing.T) {
 	urls := stationsHote()
 	avant := urls[0].String()
 
-	out := RelayStations(urls, "51.178.29.194", 30500)
+	out := RelayStations(urls, "203.0.113.250", 30500)
 	if len(out) != 2 {
 		t.Fatalf("%d stations en sortie, attendu 2", len(out))
 	}
@@ -441,13 +441,13 @@ func TestRelayStationsNeRepointeQueLaPublique(t *testing.T) {
 		t.Fatalf("le CID de l hote a disparu de la station LAN: %s", out[0].String())
 	}
 	// La publique, et elle seule, pointe vers le relais.
-	if got := out[1].Get("address"); got != "51.178.29.194" {
+	if got := out[1].Get("address"); got != "203.0.113.250" {
 		t.Fatalf("adresse publique = %q", got)
 	}
 	if got := out[1].GetInt("port"); got != 30500 {
 		t.Fatalf("port public = %d", got)
 	}
-	if got := out[1].Get("Pa"); got != "51.178.29.194" {
+	if got := out[1].Get("Pa"); got != "203.0.113.250" {
 		t.Fatalf("Pa = %q, attendu l adresse du relais", got)
 	}
 	// Ce que la Pia du pair lit pour choisir comment sonder doit survivre tel quel.
@@ -465,10 +465,10 @@ func TestRelayStationsNeRepointeQueLaPublique(t *testing.T) {
 // reperage de la station publique base sur Pa ne verrait rien a repointer ici.
 func TestRelayStationsSansPa(t *testing.T) {
 	lan := ParseStationURL("prudp:/address=10.0.0.5;port=50001;CID=7;RVCID=3")
-	pub := ParseStationURL("prudp:/address=201.97.27.16;port=52802;CID=7;RVCID=3;type=3")
+	pub := ParseStationURL("prudp:/address=203.0.113.16;port=52802;CID=7;RVCID=3;type=3")
 
-	out := RelayStations([]*StationURL{lan, pub}, "51.178.29.194", 30600)
-	if out[1].Get("address") != "51.178.29.194" || out[1].GetInt("port") != 30600 {
+	out := RelayStations([]*StationURL{lan, pub}, "203.0.113.250", 30600)
+	if out[1].Get("address") != "203.0.113.250" || out[1].GetInt("port") != 30600 {
 		t.Fatalf("la publique n a pas ete repointee: %s", out[1].String())
 	}
 	if out[1].Has("Pa") {
@@ -486,7 +486,7 @@ func TestRelayStationsSansPubliqueLaisseEnDirect(t *testing.T) {
 	b := ParseStationURL("prudp:/address=10.0.0.7;port=2;CID=2")
 	in := []*StationURL{a, b}
 
-	out := RelayStations(in, "51.178.29.194", 30700)
+	out := RelayStations(in, "203.0.113.250", 30700)
 	if len(out) != 2 || out[0] != a || out[1] != b {
 		t.Fatal("la liste devait revenir intacte")
 	}

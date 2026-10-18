@@ -102,6 +102,29 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 	if in.Err() != nil {
 		return
 	}
+	if len(stationToProbe) > natStationMax {
+		fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: station de %d octets (plafond %d) : aucun InitiateProbe\n",
+			conn.PID, len(stationToProbe), natStationMax)
+
+		return
+	}
+	// Un vrai salon nomme quelques pairs (prod : 3 entrees au plus sur 5340 requetes). Une
+	// liste plus longue que natCiblesMax n'est traitee que sur ses natCiblesMax premieres
+	// entrees : sans borne, une seule requete de quelques Mo poussait des centaines de
+	// milliers d'InitiateProbe (natpret.go, plafonds).
+	if len(targetList) > natCiblesMax {
+		fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d: %d cibles, seules les %d premieres sont traitees (plafond)\n",
+			conn.PID, len(targetList), natCiblesMax)
+		targetList = targetList[:natCiblesMax]
+	}
+	// La Pia de l'appelant sonde deja : s'il n'est pas pret, son ReplaceURL n'est plus
+	// attendu, rien ne sert de lui retenir les InitiateProbe en retour (natpret.go).
+	conn.natSonde()
+	// La station que l'appelant fait sonder est la sienne : son natm sert quand aucun
+	// ReplaceURL ne l'a encore donne (natmStation).
+	if m := ParseStationURL(stationToProbe).GetInt("natm"); m != 0 {
+		conn.natmSonde.Store(int32(m))
+	}
 
 	// Optional repointing (NEXTENDO_PROBE_REPOINT=1), OFF by default.
 	//
@@ -153,7 +176,11 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 		// salon a son propre port — donc la substitution vit ici, dans la boucle.
 		station := stationToProbe
 		corps := probeBody
-		if PairRelayActive() {
+		// Seulement la paire (arrivant, hote) dont les URL de session ont ete repointees
+		// (relayedFor, NoterSessionRelayee) : en 2 contre 2 un autre membre du salon a recu
+		// l adresse de l arrivant par l hote (Pia), en direct ; lui faire sonder le relais
+		// pendant que l arrivant le sonde en direct casserait le percage a coup sur.
+		if PairRelayActive() && SessionRelayee(conn.PID, target.PID) {
 			if rHost, rPort, ok := PairRelayFor(conn.PID, target.PID, PublicIPOf(conn), PublicIPOf(target)); ok {
 				// Meme fonction que le cote visiteur : les deux moities doivent
 				// produire exactement la meme forme, sinon elles derivent en silence.
@@ -165,9 +192,20 @@ func pushInitiateProbe(conn *Connection, req *RMCMessage) {
 			}
 		}
 		// Server-initiated requests use a distinct call-id space.
-		fmt.Printf("[NAT/diag] pushInitiateProbe caller=%d -> InitiateProbe VERS pid=%d (id=%d rvcid=%d) station=%q\n",
-			conn.PID, target.PID, target.ID, rvcid, station)
-		target.SendRMC(NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps))
+		msg := NewRMCRequest(s, ProtocolNATTraversal, MethodInitiateProbe, 0xFFFF0000+req.CallID, corps)
+		probeinit := ParseStationURL(station).GetInt("probeinit") == 1
+
+		// L'appelant fait sonder la cible : il repond donc au sondage qu'elle lui avait
+		// envoye (constat « hote muet », natpret.go).
+		target.natReponseDe(conn.ID)
+
+		// Cible pas prete (aucun ReplaceURL depuis sa derniere remise a zero) et dont le
+		// ReplaceURL est attendu : l'envoi l'attend, 2,5 s au plus. Une cible prete, ou dont
+		// le ReplaceURL n'est pas attendu, est servie comme avant.
+		if target != conn && target.natRetenir(conn, msg, rvcid, station, probeinit) {
+			continue
+		}
+		target.natEnvoyerProbe(conn, msg, rvcid, station, probeinit)
 	}
 }
 
@@ -204,6 +242,8 @@ func logNATResult(conn *Connection, req *RMCMessage) {
 	if result {
 		verdict = "ok"
 	}
+	// Tentative close : ni « hote muet » ni « abandon silencieux » pour elle.
+	conn.natVerdict(cid)
 
 	// Ce verdict porte sur le percage DIRECT vers ce pair. Si la paire est passee par le
 	// relais, son candidat public a ete repointe : il n y a plus de direct, et le verdict est
@@ -211,18 +251,91 @@ func logNATResult(conn *Connection, req *RMCMessage) {
 	// auto-entretenue — mesure du 2026-08-31, de 14 eligibles sur 46 a 134 sur 151.
 	//
 	// Le cid est le RVCID du pair, donc son Connection.ID : meme resolution que
-	// pushInitiateProbe. Pair introuvable (deja parti, cas courant) = on compte le verdict,
-	// parce que l immense majorite des verdicts sont directs.
+	// pushInitiateProbe. Pair deja parti (cas courant) : sa trace (connexionPartie, gardee
+	// relayVuTTL apres la fermeture) donne son PID et son natm, donc la paire relayee et la
+	// classe ; avant, une paire relayee dont l hote venait de partir comptait comme un echec
+	// direct, et un echec 0515 tombait en classe « ? » (prod du 17/10 : 4 verdicts sur
+	// 1 337). Sans trace non plus = on compte le verdict, parce que l immense majorite des
+	// verdicts sont directs.
+	//
+	// La classe Pia du percage (classePia) est calculee avant de noter le verdict : un echec
+	// de classe 0515 ou 0516 (NAT strict) suffit a rendre le joueur eligible au relais
+	// (besoinSeuilStrict, relaybesoin.go). Pair introuvable = classe « ? » = seuil de deux.
+	//
+	// Un echec direct 0515 met aussi en cause le pair, cote natm 2 (NoteCauseStricte) : il ne
+	// rapporte pas ce percage lui-meme.
 	relaye := false
-	if peer := conn.Endpoint.FindConnectionByID(cid); peer != nil && peer.PID != 0 {
-		relaye = PaireRelayee(conn.PID, peer.PID)
+	classe := "?"
+	var pairPID uint64
+	if peer := conn.Endpoint.FindConnectionByID(cid); peer != nil {
+		classe = classePia(conn, peer)
+		pairPID = peer.PID
+	} else if parti, ok := conn.Endpoint.connexionPartie(cid); ok {
+		classe = classePiaDe(PublicIPOf(conn), parti.ip, natmStation(conn), parti.natm)
+		pairPID = parti.pid
+	}
+	if pairPID != 0 {
+		relaye = PaireRelayee(conn.PID, pairPID)
 	}
 	if !relaye {
-		NotePercage(conn.PID, result)
+		NotePercageClasse(conn.PID, result, classe)
+		if !result && classe == "0515" {
+			NoteCauseStricte(pairPID, conn.PID)
+		}
+	} else if classe == "0516" {
+		// Joueur natm 2 qui joue par le relais : son eligibilite ne doit pas expirer
+		// pendant qu'il s'en sert (ProlongerBesoin, rien n'est compte).
+		ProlongerBesoin(conn.PID)
 	}
+	fmt.Printf("[NAT] pid=%d hole-punch to cid=%d %s (rtt=%dms detail=%d relaye=%v classe=%s)\n",
+		conn.PID, cid, verdict, rtt, detail, relaye, classe)
+}
 
-	fmt.Printf("[NAT] pid=%d hole-punch to cid=%d %s (rtt=%dms detail=%d relaye=%v)\n",
-		conn.PID, cid, verdict, rtt, detail, relaye)
+// natmStation : le natm que la console annonce dans sa station la plus recente, celui que
+// Pia met dans sa propre station (0xc40e4-0xc4254) et lit dans celle du pair (0x1604a0).
+//
+// A defaut (stations du seul Register, natm=0), celui de la station qu'elle a fait sonder
+// en dernier (RequestProbeInitiationExt, pushInitiateProbe). Prod du 17/10 00:30Z a
+// 03:40Z : 38 verdicts de classe « ? » venaient de consoles qui sondaient leurs pairs sans
+// jamais faire de ReplaceURL (Register natm=0, station sondee natm=1), dont 2 echecs 0515
+// (01:59:36Z et 01:59:52Z) comptes au seuil de deux.
+func natmStation(c *Connection) int {
+	st := c.Stations()
+	for i := len(st) - 1; i >= 0; i-- {
+		if st[i] != nil {
+			if m := st[i].GetInt("natm"); m != 0 {
+				return m
+			}
+		}
+	}
+	return int(c.natmSonde.Load())
+}
+
+// classePia : le code d erreur que le jeu afficherait si ce percage echoue
+// (NexConnectStationJob 0xf0c80-0xf104c, table 0xbd170) : meme adresse publique -> 0583 a
+// 0586 ; sinon d apres le natm local et celui du pair : 1/1 -> 0513, 1/2 -> 0515,
+// 2/1 -> 0516, 2/2 -> 0514. « ? » si un natm est inconnu.
+func classePia(local, pair *Connection) string {
+	return classePiaDe(PublicIPOf(local), PublicIPOf(pair), natmStation(local), natmStation(pair))
+}
+
+// classePiaDe : classePia a partir des adresses publiques et des natm (pair deja parti,
+// connexionPartie).
+func classePiaDe(ipLocal, ipPair string, natmLocal, natmPair int) string {
+	if ipLocal != "" && ipLocal == ipPair {
+		return "0583-0586"
+	}
+	switch [2]int{natmLocal, natmPair} {
+	case [2]int{1, 1}:
+		return "0513"
+	case [2]int{1, 2}:
+		return "0515"
+	case [2]int{2, 1}:
+		return "0516"
+	case [2]int{2, 2}:
+		return "0514"
+	}
+	return "?"
 }
 
 // noteNATProperties parses ReportNATProperties (natMapping u32, natFiltering u32,
