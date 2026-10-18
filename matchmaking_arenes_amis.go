@@ -28,7 +28,7 @@ package nex
 // 0x3756d30) : sur une vraie Switch l identifiant demande est peut-etre le NSA et non le PID
 // (hypothese, le corps de 0x6D.0x33 n etait pas journalise). On accepte donc les deux : le
 // PID tel quel, sinon la traduction NSA -> PID apprise a l authentification
-// (PIDForLoginName, ticketgranting.go). L emulateur Nextendo presente le PID comme NSA.
+// (PIDForLoginName, ticketgranting.go).
 //
 // Ce que la liste rend, pour chaque identifiant demande : les arenes ou ce joueur est
 // present, creees par CreateMatchmakeSessionWithParam (0x6D.0x26, gathering.arene), ouvertes

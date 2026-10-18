@@ -246,7 +246,7 @@ func PairRelayFor(pidA, pidB uint64, ipA, ipB string) (string, int, bool) {
 	}
 
 	// Seulement pour ceux qui en ont besoin. Detourner une paire qui se joignait en direct,
-	// c est lui ajouter un aller-retour par la France et lui faire courir le risque du
+	// c est lui ajouter un aller-retour par le relais et lui faire courir le risque du
 	// moindre defaut du relais — pour rien. Mesure du 2026-08-31 : arme pour tout le monde,
 	// il a mis dehors des joueurs qui n avaient aucun probleme.
 	//

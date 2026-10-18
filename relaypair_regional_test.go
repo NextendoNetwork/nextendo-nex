@@ -199,7 +199,7 @@ func TestRelayNodesPlusieursLignes(t *testing.T) {
 	pa := ecrireFichier(t, dir, "a.txt", plageA+"\n")
 	pb := ecrireFichier(t, dir, "b.txt", plageB+"\n")
 	cfg := ecrireFichier(t, dir, "relay_node.txt", strings.Join([]string{
-		"# Ameriques puis Russie",
+		"# noeuds regionaux",
 		"http://192.0.2.1:8790 192.0.2.1 " + cle + " " + pa + "  # noeud regional",
 		"",
 		"ligne invalide",

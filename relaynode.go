@@ -2,8 +2,8 @@ package nex
 
 // Client side of the relay node service, copied into each game server (package name adjusted there).
 // Configured by one file, read at startup:
-//   <url> <public ip> <secret file> <americas ranges file>
-// e.g. "http://198.51.100.50:8790 198.51.100.50 /chemin/relay_node.key /chemin/relay_americas.txt".
+//   <url> <public ip> <secret file> <ranges file>
+// e.g. "http://198.51.100.50:8790 198.51.100.50 /chemin/relay_node.key /chemin/relay_ranges.txt".
 // Missing or unreadable file = no regional relay: every caller keeps using its own (prod) relay.
 //
 // Plusieurs noeuds : une ligne par noeud, dans l ordre de preference, "#" ouvre un

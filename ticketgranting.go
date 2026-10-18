@@ -19,9 +19,8 @@ const (
 	MethodLoginWithContext uint32 = 6
 )
 
-// Le rappel d'identite entre le login (auth) et la connexion secure ne fait pas partie de la
-// version publique du coeur : l'identite d'un CONNECT secure est etablie par le verificateur
-// de CONNECT (verification_publique.go).
+// L'identite d'un CONNECT secure est etablie par le verificateur de CONNECT
+// (verification_publique.go).
 
 // RVConnectionData tells the client where to reach the secure server. NEX >= 3.5
 // uses version 1, which appends the server time.

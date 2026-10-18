@@ -39,10 +39,10 @@ func TestCommonDataNamesLitLesDeuxNoms(t *testing.T) {
 }
 
 // Les noms non latins doivent survivre : une part des joueurs en utilise, et un
-// décodage qui les mutile rendrait la modération injuste pour eux seuls.
+// décodage qui les mutile les rendrait illisibles pour eux seuls.
 func TestCommonDataNamesGardeLeNonLatin(t *testing.T) {
 	// Le nom Mii est en UTF-16 : c'est lui qui porte les alphabets non latins.
-	mii, _, ok := CommonDataNames(profilMK8("アナキン", "anakin"))
+	mii, _, ok := CommonDataNames(profilMK8("アナキン", "pilote"))
 	if !ok || mii != "アナキン" {
 		t.Fatalf("nom Mii : %q ok=%v, attendu %q", mii, ok, "アナキン")
 	}
@@ -67,7 +67,7 @@ func TestCommonDataNamesRefuseUnBlocNonConforme(t *testing.T) {
 	}
 }
 
-// Un pseudo vide est licite côté format : c'est un signal de modération, pas une
+// Un pseudo vide est licite côté format : c'est une valeur possible, pas une
 // erreur de décodage. Il doit ressortir comme chaîne vide avec ok=true.
 func TestCommonDataNamesPseudoVide(t *testing.T) {
 	_, pseudo, ok := CommonDataNames(profilMK8("Mii", ""))

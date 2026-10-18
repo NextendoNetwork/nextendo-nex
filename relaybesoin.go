@@ -2,7 +2,7 @@ package nex
 
 // Qui a BESOIN du relais.
 //
-// Arme pour tout le monde, le relais fait passer par la France deux joueurs qui se
+// Arme pour tout le monde, le relais fait passer par le relais deux joueurs qui se
 // joignaient tres bien en direct, et le moindre defaut du relais casse une partie qui
 // marchait. Mesure du 2026-08-31 : arme globalement, il a mis dehors des joueurs qui
 // n avaient aucun probleme — huit se sont manifestes en une minute.

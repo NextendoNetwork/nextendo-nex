@@ -1,12 +1,12 @@
 package nex
 
-// Regional pair relay. When both players of a relayed pair are in the regional node's area (e.g. a node serving
-// ARIN + LACNIC addresses), the pair's port is opened on that node instead of here, so two
-// players in the Americas no longer cross the Atlantic twice. Same relay rules on the node (see
+// Regional pair relay. When both players of a relayed pair are in the regional node's area (a node serving
+// given address ranges), the pair's port is opened on that node instead of here, so two
+// nearby players no longer go through a distant relay. Same relay rules on the node (see
 // the relay node service). Anything else — one player outside the area, node down, node refusing —
 // falls through to the local relay exactly as before.
 //
-// Config file: NEXTENDO_RELAY_NODE_FILE (default /nat/relay_node.txt), see relaynode.go. Absent = off.
+// Config file: NEXTENDO_RELAY_NODE_FILE (default relay_node.txt), see relaynode.go. Absent = off.
 //
 // Plusieurs noeuds (une ligne chacun) : la paire va au PREMIER noeud sain qui sert les DEUX
 // adresses. S il refuse ou ne repond pas, on essaie le suivant qui les sert aussi, puis le
@@ -57,7 +57,7 @@ func loadRegionalNode() {
 	regionalTried = true
 	path := os.Getenv("NEXTENDO_RELAY_NODE_FILE")
 	if path == "" {
-		path = "/nat/relay_node.txt"
+		path = "relay_node.txt"
 	}
 	regionalNodes = LoadRelayNodes(path)
 	for _, n := range regionalNodes {

@@ -56,9 +56,7 @@ import (
 // A TOUT MOMENT, PAS SEULEMENT APRES LE DEPART DU PROPRIETAIRE. C'est voulu, et c'est ce que
 // fait Nintendo (23:36:44 : l'ancien hote recoit 4000 et 110000 avant son propre 0x32.0x1) :
 // les consoles excluent l'ancien hote du maillage avant que le serveur ne le sache (prod du
-// 17/10 : il n'en sort que 0,04 a 141 s apres l'appel). Consequence connue (comme Pretendo) :
-// un participant peut prendre le salon d'un autre, puis le supprimer (0x15.0x2 verifie
-// OwnerPID) ou servir ses propres URL de session (hostConnID).
+// 17/10 : il n'en sort que 0,04 a 141 s apres l'appel).
 func (m *Matchmaking) updateSessionHost(conn *Connection, req *RMCMessage) *RMCMessage {
 	s := conn.Settings
 	ok := NewRMCSuccess(s, ProtocolMatchMaking, req.Method, req.CallID, nil)
