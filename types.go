@@ -132,10 +132,18 @@ func NewStationURL(scheme string) *StationURL {
 	return &StationURL{Scheme: scheme, params: map[string]string{}}
 }
 
+// MaxStationURLLength bounds a station URL. nn::nex::StationURL::Format on every NEX
+// client formats the parameters into a fixed 1024 wchar buffer without counting what is
+// already written, so a longer URL relayed to other consoles (NAT traversal,
+// matchmaking session URLs) overflows it: remote crash, possibly RCE
+// (GHSA-j6m5-jqph-f634). Legitimate URLs are a few hundred characters at most.
+const MaxStationURLLength = 512
+
 // ParseStationURL parses "scheme:/k=v;k=v"; an empty string yields an empty URL.
+// A URL longer than MaxStationURLLength is dropped (empty URL), never stored or relayed.
 func ParseStationURL(s string) *StationURL {
 	u := &StationURL{params: map[string]string{}}
-	if s == "" {
+	if s == "" || len(s) > MaxStationURLLength {
 		return u
 	}
 	i := strings.Index(s, ":/")
@@ -211,7 +219,10 @@ func (u *StationURL) String() string {
 	}
 	joined := strings.Join(parts, ";")
 	if u.Scheme != "" {
-		return u.Scheme + ":/" + joined
+		joined = u.Scheme + ":/" + joined
+	}
+	if len(joined) > MaxStationURLLength {
+		return "" // never send a URL a console could overflow on (see MaxStationURLLength)
 	}
 	return joined
 }
